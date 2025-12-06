@@ -1,27 +1,6 @@
 import datetime
 import pandas as pd
 
-PUESTOS = [
-    {
-        "nombre": "puesto_1",
-        "nocturno": False,
-    },
-    {
-        "nombre": "puesto_2",
-        "nocturno": False,
-    },
-    {
-        "nombre": "puesto_3 (noche)",
-        "nocturno": True,
-    },
-    {
-        "nombre": "puesto_4",
-        "nocturno": False,
-    }
-]
-
-EMPLEADOS = [{"nombre": f"Empleado_{i}"} for i in range(5)]
-
 def crear_clase_empleado (e):
     return {
         "nombre": e['nombre'],
@@ -52,10 +31,11 @@ def actualizar_empleados (empleados, nombre, nocturno):
             actualizados.append(empleado)
     return actualizados
 
-def actualizar_descansos (empleados, dia, dia_anterior):
+def actualizar_descansos (empleados, dia, dia_anterior, PUESTOS):
+    puestos_nocturnos = [item for item in PUESTOS if item["nocturno"]]
     actualizados = []
     empleados_dia = list(dia.values())
-    empleados_dia_anterior = list(dia_anterior.values())
+    empleados_dia_anterior = [dia_anterior[puesto["nombre"]] for puesto in puestos_nocturnos]
     
     for empleado in empleados:
         if empleado["nombre"] not in empleados_dia and empleado["nombre"] not in empleados_dia_anterior:
@@ -116,7 +96,7 @@ if __name__ == "__main__":
         # Bloquea segun dias libres
         for empleado in empleados:
             dias_trabajados = empleado["turnos_noche"] + empleado["turnos_dia"]
-            if dias_trabajados // 3 > empleado["descansos"]:
+            if 2 *(dias_trabajados // 5) > empleado["descansos"]:
                 bloqueos_descanso.append(empleado["nombre"])
             if dia['fecha'] in empleado['bloqueos_dia']:
                 bloqueos_dia.append(empleado["nombre"])
@@ -127,7 +107,7 @@ if __name__ == "__main__":
             dia_anterior = cronograma[i - 1]
             puestos_nocturnos = [item for item in PUESTOS if item["nocturno"]]
             for p in puestos_nocturnos:
-                trabajadores_bloqueados.append(dia_anterior[p["nombre"]])
+                bloqueos_dia.append(dia_anterior[p["nombre"]])
         
         # Asignar puestos
         for puesto in PUESTOS:
@@ -160,7 +140,7 @@ if __name__ == "__main__":
         
         if i > 0:
             # Actualizar los dias de descanso
-            empleados = actualizar_descansos(empleados, dia, cronograma[i -1])
+            empleados = actualizar_descansos(empleados, dia, cronograma[i -1], PUESTOS)
 
     data_excel = {
         'Puestos': [puesto['nombre'] for puesto in PUESTOS],
@@ -168,7 +148,16 @@ if __name__ == "__main__":
     for dia in cronograma:
         data_excel[dia['fecha']] = [dia[puesto["nombre"]] for puesto in PUESTOS]
     df = pd.DataFrame(data_excel)
-    df.to_excel(f"Cronograma-{cronograma[0]['fecha']}-{cronograma[-1]['fecha']}.xlsx", sheet_name='Cronograma', index=False)
+    excel_file_path = f"Cronograma-{cronograma[0]['fecha']}-{cronograma[-1]['fecha']}.xlsx"
+    with pd.ExcelWriter(excel_file_path, engine='openpyxl') as writer:  
+        df.to_excel(writer, sheet_name='Cronograma', index=False)
+        for empleado in empleados:
+            cr_empleado = {"Día": [empleado["turnos_dia"]], "Noche": [empleado["turnos_noche"]], "Descansos": [empleado["descansos"]]}
+            for dia in cronograma:
+                puesto_trabajado = next((puesto for puesto in PUESTOS if dia[puesto["nombre"]] == empleado["nombre"]), {"nombre": "-"})
+                cr_empleado[dia['fecha']] = [puesto_trabajado["nombre"]]
+            de = pd.DataFrame(cr_empleado)
+            de.to_excel(writer, sheet_name=empleado["nombre"], index=False)
     # for dia in cronograma:
     #     print(f"\n{dia["fecha"]}:")
     #     for puesto in PUESTOS:
