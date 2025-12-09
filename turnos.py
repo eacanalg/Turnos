@@ -9,6 +9,7 @@ def crear_clase_empleado (e):
         "descansos": 0,
         'bloqueos_dia': e['bloqueos_dia'],
         'bloqueos_noche': e['bloqueos_noche'],
+        'puestos_habilitados': e['puestos_habilitados']
     }
 
 def cronograma_diario_vacio (dia, puestos):
@@ -53,6 +54,7 @@ if __name__ == "__main__":
     # Carga de datos
     pages = xls = pd.ExcelFile('Entradas.xlsm').sheet_names
     df_configs = pd.read_excel('Entradas.xlsm', sheet_name='Configs', header=None, names=['A', 'B'])
+    df_empleados = pd.read_excel('Entradas.xlsm', sheet_name='Empleados', header=None, names=['nombre', 'puestos_habilitados'])
     fecha_inicio = formatear_fecha(df_configs.at[0, 'B'])
     fecha_fin = formatear_fecha(df_configs.at[1, 'B'])
 
@@ -70,6 +72,7 @@ if __name__ == "__main__":
         bloqueos_dia = []
         bloqueos_noche = []
         df_empleado = pd.read_excel('Entradas.xlsm', sheet_name=empleado, names=['fecha', 'dia', 'noche'])
+        puestos_empleado = df_empleados.loc[df_empleados['nombre'] == empleado].iloc[0]['puestos_habilitados'].split(', ')
         for index, row in df_empleado.iterrows():
             if (not pd.isna(row['dia'])):
                 bloqueos_dia.append(formatear_fecha(row['fecha']))
@@ -79,6 +82,7 @@ if __name__ == "__main__":
             'nombre': empleado,
             'bloqueos_dia': bloqueos_dia,
             'bloqueos_noche':bloqueos_noche,
+            'puestos_habilitados': puestos_empleado
         })
     #Cuadro de turnos
     
@@ -93,15 +97,19 @@ if __name__ == "__main__":
         bloqueos_descanso = []
         bloqueos_dia = []
         bloqueos_noche = []
-        # Bloquea segun dias libres
+        # Bloqueos
         for empleado in empleados:
+            # Bloqueo dias libres
             dias_trabajados = empleado["turnos_noche"] + empleado["turnos_dia"]
             if 2 *(dias_trabajados // 5) > empleado["descansos"]:
                 bloqueos_descanso.append(empleado["nombre"])
+
+            # Bloqueo por cronograma
             if dia['fecha'] in empleado['bloqueos_dia']:
                 bloqueos_dia.append(empleado["nombre"])
             if dia['fecha'] in empleado['bloqueos_noche']:
-                bloqueos_noche.append(empleado["nombre"])        
+                bloqueos_noche.append(empleado["nombre"])
+          
         # Bloquear empleados que trabajaron la noche anterior 
         if i > 0:
             dia_anterior = cronograma[i - 1]
@@ -113,18 +121,20 @@ if __name__ == "__main__":
         for puesto in PUESTOS:
             es_nocturno = puesto["nocturno"]
             
-            #Bloqueo por asignacion dia actual o noche anterior
+            #Bloqueo por puesto
+            bloqueos_puesto = [e['nombre'] for e in empleados if puesto['nombre'] not in e['puestos_habilitados']]
+            #Empleados habilitados
             if es_nocturno:
-                empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_descanso + bloqueos_noche]
+                empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_descanso + bloqueos_noche + bloqueos_puesto]
             else:
-                empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_descanso + bloqueos_dia]
+                empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_descanso + bloqueos_dia + bloqueos_puesto]
             
             # Si no encuentra un trabajador ideal, sacrifica condcion dia libre
             if len(empleados_habilitados) == 0:
                 if es_nocturno:
-                    empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_noche]
+                    empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_noche + bloqueos_puesto]
                 else:
-                    empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_dia]
+                    empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_dia + bloqueos_puesto]
                 
             # Solo si hay trabajador disponible
             if len(empleados_habilitados) > 0:
@@ -142,8 +152,10 @@ if __name__ == "__main__":
             # Actualizar los dias de descanso
             empleados = actualizar_descansos(empleados, dia, cronograma[i -1], PUESTOS)
 
+    #Generar excel
     data_excel = {
         'Puestos': [puesto['nombre'] for puesto in PUESTOS],
+        'Nocturno': [puesto['nocturno'] for puesto in PUESTOS],
     }
     for dia in cronograma:
         data_excel[dia['fecha']] = [dia[puesto["nombre"]] for puesto in PUESTOS]
