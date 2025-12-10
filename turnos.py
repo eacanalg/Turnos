@@ -1,6 +1,19 @@
 import datetime
 import pandas as pd
 
+def get_excel_column_name(column_number):
+    column_name = ""
+    while column_number > 0:
+        # Adjust for 0-based remainder (A=1 becomes 0, B=2 becomes 1, etc.)
+        column_number -= 1
+        # Find the remainder to determine the current character
+        remainder = column_number % 26
+        # Convert the remainder to a character (A is ASCII 65)
+        column_name = chr(65 + remainder) + column_name
+        # Move to the next "digit"
+        column_number //= 26
+    return column_name
+
 def crear_clase_empleado (e):
     return {
         "nombre": e['nombre'],
@@ -161,15 +174,23 @@ if __name__ == "__main__":
         data_excel[dia['fecha']] = [dia[puesto["nombre"]] for puesto in PUESTOS]
     df = pd.DataFrame(data_excel)
     excel_file_path = f"Cronograma-{cronograma[0]['fecha']}-{cronograma[-1]['fecha']}.xlsx"
-    with pd.ExcelWriter(excel_file_path, engine='openpyxl') as writer:  
+    with pd.ExcelWriter(excel_file_path, engine='xlsxwriter') as writer:
+        workbook = writer.book
+        workbook.set_calc_mode('auto')
+        workbook.calc_on_load = True
         df.to_excel(writer, sheet_name='Cronograma', index=False)
         for empleado in empleados:
-            cr_empleado = {"Día": [empleado["turnos_dia"]], "Noche": [empleado["turnos_noche"]], "Descansos": [empleado["descansos"]]}
-            for dia in cronograma:
-                puesto_trabajado = next((puesto for puesto in PUESTOS if dia[puesto["nombre"]] == empleado["nombre"]), {"nombre": "-"})
-                cr_empleado[dia['fecha']] = [puesto_trabajado["nombre"]]
+            cr_empleado = {
+                "Día": [f'=SUMPRODUCT((Cronograma!B2:B{len(PUESTOS ) + 1}=FALSE) * (COUNTIF(D2:{get_excel_column_name(len(cronograma) + 3)}2, Cronograma!A2:A{len(PUESTOS ) + 1})))'], 
+                "Noche": [f'=SUMPRODUCT((Cronograma!B2:B{len(PUESTOS ) + 1}=TRUE) * (COUNTIF(D2:{get_excel_column_name(len(cronograma) + 3)}2, Cronograma!A2:A{len(PUESTOS ) + 1})))'], 
+                "Descanso": [0]
+            }
+            for index, dia in enumerate(cronograma):
+                cr_empleado[dia['fecha']] = [f'=_xlfn.XLOOKUP("{empleado["nombre"]}",Cronograma!{get_excel_column_name(index + 3)}2:{get_excel_column_name(index + 3)}{len(PUESTOS ) + 1},Cronograma!A2:A{len(PUESTOS ) + 1},"")']
             de = pd.DataFrame(cr_empleado)
             de.to_excel(writer, sheet_name=empleado["nombre"], index=False)
+            worksheet = writer.sheets[empleado["nombre"]]
+            worksheet.write_formula("C2", f'=SUMPRODUCT((E2:{get_excel_column_name(len(cronograma) + 3)}2="") * NOT(IFERROR(VLOOKUP(N(D2:{get_excel_column_name(len(cronograma) + 2)}2),Cronograma!A2:B{len(PUESTOS ) + 1},2,FALSE), FALSE)))')
     # for dia in cronograma:
     #     print(f"\n{dia["fecha"]}:")
     #     for puesto in PUESTOS:
