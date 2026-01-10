@@ -179,19 +179,58 @@ if __name__ == "__main__":
         workbook.set_calc_mode('auto')
         workbook.calc_on_load = True
         df.to_excel(writer, sheet_name='Cronograma', index=False)
-        for empleado in empleados:
-            cr_empleado = {
-                "Día": [f'=SUMPRODUCT((Cronograma!B2:B{len(PUESTOS ) + 1}=FALSE) * (COUNTIF(D2:{get_excel_column_name(len(cronograma) + 3)}2, Cronograma!A2:A{len(PUESTOS ) + 1})))'], 
-                "Noche": [f'=SUMPRODUCT((Cronograma!B2:B{len(PUESTOS ) + 1}=TRUE) * (COUNTIF(D2:{get_excel_column_name(len(cronograma) + 3)}2, Cronograma!A2:A{len(PUESTOS ) + 1})))'], 
-                "Descanso": [0]
-            }
-            for index, dia in enumerate(cronograma):
-                cr_empleado[dia['fecha']] = [f'=_xlfn.XLOOKUP("{empleado["nombre"]}",Cronograma!{get_excel_column_name(index + 3)}2:{get_excel_column_name(index + 3)}{len(PUESTOS ) + 1},Cronograma!A2:A{len(PUESTOS ) + 1},"")']
-            de = pd.DataFrame(cr_empleado)
-            de.to_excel(writer, sheet_name=empleado["nombre"], index=False)
-            worksheet = writer.sheets[empleado["nombre"]]
-            worksheet.write_formula("C2", f'=SUMPRODUCT((E2:{get_excel_column_name(len(cronograma) + 3)}2="") * NOT(IFERROR(VLOOKUP(N(D2:{get_excel_column_name(len(cronograma) + 2)}2),Cronograma!A2:B{len(PUESTOS ) + 1},2,FALSE), FALSE)))')
-    # for dia in cronograma:
-    #     print(f"\n{dia["fecha"]}:")
-    #     for puesto in PUESTOS:
-    #         print(f"  - {puesto["nombre"]}: {dia[puesto["nombre"]]}")
+        worksheet = writer.sheets["Cronograma"]
+        worksheet.autofit()
+
+        # Hoja 2
+        format_yellow = workbook.add_format({'bg_color': '#FFFF00'})
+        format_blue = workbook.add_format({'bg_color': '#0033CC'})
+        format_green = workbook.add_format({'bg_color': '#0DBF33'})
+        cr_individual = {
+            "Nombre": [empleado["nombre"] for empleado in empleados],
+            "Día": [f'=SUMPRODUCT((Cronograma!B2:B{len(PUESTOS ) + 1}=FALSE) * (COUNTIF(E{index+2}:{get_excel_column_name(len(cronograma) + 4)}{index+2}, Cronograma!A2:A{len(PUESTOS ) + 1})))' for index, empleado in enumerate(empleados)], 
+            "Noche": [f'=SUMPRODUCT((Cronograma!B2:B{len(PUESTOS ) + 1}=TRUE) * (COUNTIF(E{index+2}:{get_excel_column_name(len(cronograma) + 4)}{index+2}, Cronograma!A2:A{len(PUESTOS ) + 1})))' for index, empleado in enumerate(empleados)], 
+            "Descanso": [empleado["nombre"] for empleado in empleados],
+        }
+        for index, dia in enumerate(cronograma):
+            cr_individual[dia['fecha']] = [f'=_xlfn.XLOOKUP("{empleado["nombre"]}",Cronograma!{get_excel_column_name(index + 3)}2:{get_excel_column_name(index + 3)}{len(PUESTOS ) + 1},Cronograma!A2:A{len(PUESTOS ) + 1},"")' for empleado in empleados]
+        
+        di = pd.DataFrame(cr_individual)
+        di.to_excel(writer, sheet_name="Empleados", index=False)
+        worksheet = writer.sheets["Empleados"]
+        
+        for index, empleado in enumerate(empleados):
+            worksheet.write_dynamic_array_formula(f'D{index+2}', f'=SUMPRODUCT((F{index+2}:{get_excel_column_name(len(cronograma) + 4)}{index+2}="") * NOT(IFERROR(VLOOKUP((E{index+2}:{get_excel_column_name(len(cronograma) + 3)}{index+2}),Cronograma!A2:B{len(PUESTOS ) + 1},2,FALSE), FALSE)))')
+        worksheet.conditional_format(f'E2:{get_excel_column_name(len(cronograma) + 4)}{len(empleados) + 1}', {
+            'type':     'formula',
+            'criteria': f'=VLOOKUP((E2),Cronograma!$A$2:$B${len(PUESTOS ) + 1},2,FALSE)=FALSE',
+            'format':   format_yellow
+        })
+        worksheet.conditional_format(f'B2:B{len(empleados) + 1}', {
+            'type':     'formula',
+            'criteria': f'=TRUE',
+            'format':   format_yellow
+        })
+        worksheet.conditional_format(f'E2:{get_excel_column_name(len(cronograma) + 4)}{len(empleados) + 1}', {
+            'type':     'formula',
+            'criteria': f'=VLOOKUP((E2),Cronograma!$A$2:$B${len(PUESTOS ) + 1},2,FALSE)=TRUE',
+            'format':   format_blue
+        })
+        worksheet.conditional_format(f'C2:C{len(empleados) + 1}', {
+            'type':     'formula',
+            'criteria': f'=TRUE',
+            'format':   format_blue
+        })
+        worksheet.conditional_format(f'F2:{get_excel_column_name(len(cronograma) + 4)}{len(empleados) + 1}', {
+            'type':     'formula',
+            'criteria': f'=AND(NOT(IFERROR(VLOOKUP((E2),Cronograma!$A$2:$B${len(PUESTOS ) + 1},2,FALSE), FALSE)=TRUE), F2="")',
+            'format':   format_green
+        })
+        worksheet.conditional_format(f'D2:D{len(empleados) + 1}', {
+            'type':     'formula',
+            'criteria': f'=TRUE',
+            'format':   format_green
+        })
+        
+        worksheet.autofit()
+        worksheet.protect(options={'format_columns': True, 'format_rows': True})
