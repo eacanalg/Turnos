@@ -1,5 +1,6 @@
 import datetime
 import pandas as pd
+import networkx as nx
 
 def get_excel_column_name(column_number):
     column_name = ""
@@ -101,8 +102,8 @@ if __name__ == "__main__":
             'bloqueos_noche':bloqueos_noche,
             'puestos_habilitados': puestos_empleado
         })
+
     #Cuadro de turnos
-    
     delta = fecha_fin - fecha_inicio
     dias = [fecha_inicio + datetime.timedelta(days=i) for i in range(delta.days + 1)]
     empleados = [crear_clase_empleado(e) for e in EMPLEADOS]
@@ -134,31 +135,57 @@ if __name__ == "__main__":
             for p in puestos_nocturnos:
                 bloqueos_dia.append(dia_anterior[p["nombre"]])
         
-        # Asignar puestos
+        puestos_con_disponibilidad = []
         for puesto in PUESTOS:
+            nuevo_puesto = puesto.copy()
             es_nocturno = puesto["nocturno"]
             
             #Bloqueo por puesto
             bloqueos_puesto = [e['nombre'] for e in empleados if puesto['nombre'] not in e['puestos_habilitados']]
             #Empleados habilitados
+            empleados_habilitados = []
             if es_nocturno:
                 empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_descanso + bloqueos_noche + bloqueos_puesto]
             else:
                 empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_descanso + bloqueos_dia + bloqueos_puesto]
-            
-            # Si no encuentra un trabajador ideal, sacrifica condcion dia libre
-            # if len(empleados_habilitados) == 0:
-            #     if es_nocturno:
-            #         empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_noche + bloqueos_puesto]
-            #     else:
-            #         empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_dia + bloqueos_puesto]
-                
+            nuevo_puesto["empleados_disponibles"] = empleados_habilitados
+            puestos_con_disponibilidad.append(nuevo_puesto)
+
+        # Se busca la combinacion mas eficiente usando grafos
+        G = nx.Graph()
+        objetos_grafo = {}
+
+        for puesto in puestos_con_disponibilidad:
+            objetos_grafo[puesto["nombre"]] = [e["nombre"] for e in puesto["empleados_disponibles"]]
+        puestos_grafo = list(objetos_grafo.keys())
+
+        for puesto in puestos_grafo:
+            G.add_node(puesto, bipartite=0)
+
+        for personas in objetos_grafo.values():
+            for persona in personas:
+                G.add_node(persona, bipartite=1)
+        
+        for puesto, personas in objetos_grafo.items():
+            for persona in personas:
+                G.add_edge(puesto, persona, weight=50)
+
+        matching = nx.algorithms.matching.max_weight_matching(G, maxcardinality=True)
+
+        resultado = {}
+
+        for u, v in matching:
+            if u in puestos_grafo:
+                resultado[u] = v
+            else:
+                resultado[v] = u
+
+        # Asignar puestos
+        for puesto in puestos_con_disponibilidad:
+            es_nocturno = puesto["nocturno"]
+            empleado_a_asignar = next((empleado for empleado in empleados if empleado['nombre'] == resultado.get(puesto['nombre'])), None)
             # Solo si hay trabajador disponible
-            if len(empleados_habilitados) > 0:
-                # Encuentra el trabajador disponible que menos ha trabajado
-                empleado_a_asignar = min(empleados_habilitados, key=lambda item: item["turnos_noche"]) if es_nocturno else min(empleados_habilitados, key=lambda item: item["turnos_dia"])
-                # Bloquea el trabajador elegido para no asignarlo a otro puesto el mismo dia
-                trabajadores_bloqueados.append(empleado_a_asignar["nombre"])
+            if empleado_a_asignar:
                 # Actualiza la cuenta de jornadas
                 empleados = actualizar_empleados(empleados, empleado_a_asignar["nombre"], es_nocturno)
                 #Actualiza el calendario final
