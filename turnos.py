@@ -20,6 +20,7 @@ def crear_clase_empleado (e):
         "turnos_dia": 0,
         "turnos_noche": 0,
         "descansos": 0,
+        'dias_sin_descanso': 0,
         'bloqueos_dia': e['bloqueos_dia'],
         'bloqueos_noche': e['bloqueos_noche'],
         'puestos_habilitados': e['puestos_habilitados']
@@ -55,9 +56,12 @@ def actualizar_descansos (empleados, dia, dia_anterior, PUESTOS):
         if empleado["nombre"] not in empleados_dia and empleado["nombre"] not in empleados_dia_anterior:
             objeto_modificado = empleado.copy()
             objeto_modificado["descansos"] += 1
+            objeto_modificado['dias_sin_descanso'] = 0
             actualizados.append(objeto_modificado)
         else:
-            actualizados.append(empleado)
+            objeto_modificado = empleado.copy()
+            objeto_modificado['dias_sin_descanso'] += 1
+            actualizados.append(objeto_modificado)
     return actualizados
 
 def formatear_fecha (fecha):
@@ -114,7 +118,7 @@ if __name__ == "__main__":
         for empleado in empleados:
             # Bloqueo dias libres
             dias_trabajados = empleado["turnos_noche"] + empleado["turnos_dia"]
-            if 2 *(dias_trabajados // 5) > empleado["descansos"]:
+            if 2 *(dias_trabajados // 5) > empleado["descansos"] or empleado['dias_sin_descanso'] > 4:
                 bloqueos_descanso.append(empleado["nombre"])
 
             # Bloqueo por cronograma
@@ -143,11 +147,11 @@ if __name__ == "__main__":
                 empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_descanso + bloqueos_dia + bloqueos_puesto]
             
             # Si no encuentra un trabajador ideal, sacrifica condcion dia libre
-            if len(empleados_habilitados) == 0:
-                if es_nocturno:
-                    empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_noche + bloqueos_puesto]
-                else:
-                    empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_dia + bloqueos_puesto]
+            # if len(empleados_habilitados) == 0:
+            #     if es_nocturno:
+            #         empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_noche + bloqueos_puesto]
+            #     else:
+            #         empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_dia + bloqueos_puesto]
                 
             # Solo si hay trabajador disponible
             if len(empleados_habilitados) > 0:
@@ -181,11 +185,18 @@ if __name__ == "__main__":
         df.to_excel(writer, sheet_name='Cronograma', index=False)
         worksheet = writer.sheets["Cronograma"]
         worksheet.autofit()
+        format_red = workbook.add_format({'bg_color': '#FF0000'})
+        worksheet.conditional_format(f'C2:{get_excel_column_name(len(cronograma) + 2)}{len(PUESTOS) + 1}', {
+            'type':     'formula',
+            'criteria': f'=C2=""',
+            'format':   format_red
+        })
 
         # Hoja 2
         format_yellow = workbook.add_format({'bg_color': '#FFFF00'})
         format_blue = workbook.add_format({'bg_color': '#0033CC'})
         format_green = workbook.add_format({'bg_color': '#0DBF33'})
+
         cr_individual = {
             "Nombre": [empleado["nombre"] for empleado in empleados],
             "Día": [f'=SUMPRODUCT((Cronograma!B2:B{len(PUESTOS ) + 1}=FALSE) * (COUNTIF(E{index+2}:{get_excel_column_name(len(cronograma) + 4)}{index+2}, Cronograma!A2:A{len(PUESTOS ) + 1})))' for index, empleado in enumerate(empleados)], 
