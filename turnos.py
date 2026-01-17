@@ -68,6 +68,30 @@ def actualizar_descansos (empleados, dia, dia_anterior, PUESTOS):
 def formatear_fecha (fecha):
     return fecha.date()
 
+def calcular_peso_persona (empleado, puesto, dias):
+    peso_base = 10
+    dias_trabajados = empleado['turnos_dia'] + empleado['turnos_noche']
+    nocturno=puesto['nocturno']
+    # Que baja el peso:  pocos dias de descanso, muchos dias seguidos, muchos turnos de este horario
+
+    # Dias de descanso el balance debe ser de 2 dias de descanso por 5 de trabajo. En la proporción cada dia representa 0.2 y el valor ideal es 0.4.
+    if (dias_trabajados == 0):
+        variable_por_descansos = 5 #Aumentar para trabajar
+    else:
+        # ratio - target * amplificacion.
+        variable_por_descansos = ((empleado['descansos'] / (empleado['turnos_dia'] + empleado['turnos_noche'])) - 0.4) * 10
+    
+    # Dias de trabajo. Solo se activa al trabajar 5 dias seguidos. Penaliza por 2 cada dia extra laborado
+    variable_por_trabajos = min(0, 5 - empleado['dias_sin_descanso']) * 10
+
+    # Variable por disparidad entre jornadas
+    if nocturno:
+        variable_jornadas = (empleado['turnos_dia'] - empleado['turnos_noche'])/2
+    else:
+        variable_jornadas = (empleado['turnos_noche'] - empleado['turnos_dia'])/2
+
+    return peso_base + variable_por_descansos + variable_por_trabajos + variable_jornadas
+
 if __name__ == "__main__":
     # Carga de datos
     pages = xls = pd.ExcelFile('Entradas.xlsm').sheet_names
@@ -111,16 +135,11 @@ if __name__ == "__main__":
 
     for i in range(len(cronograma)):
         dia = cronograma[i]
-        trabajadores_bloqueados = []
-        bloqueos_descanso = []
+        print('\n\n------'+dia['fecha'].strftime("%Y-%m-%d"))
         bloqueos_dia = []
         bloqueos_noche = []
         # Bloqueos
         for empleado in empleados:
-            # Bloqueo dias libres
-            dias_trabajados = empleado["turnos_noche"] + empleado["turnos_dia"]
-            if 2 *(dias_trabajados // 5) > empleado["descansos"] or empleado['dias_sin_descanso'] > 4:
-                bloqueos_descanso.append(empleado["nombre"])
 
             # Bloqueo por cronograma
             if dia['fecha'] in empleado['bloqueos_dia']:
@@ -145,9 +164,9 @@ if __name__ == "__main__":
             #Empleados habilitados
             empleados_habilitados = []
             if es_nocturno:
-                empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_descanso + bloqueos_noche + bloqueos_puesto]
+                empleados_habilitados = [item for item in empleados if item["nombre"] not in bloqueos_noche + bloqueos_puesto]
             else:
-                empleados_habilitados = [item for item in empleados if item["nombre"] not in trabajadores_bloqueados + bloqueos_descanso + bloqueos_dia + bloqueos_puesto]
+                empleados_habilitados = [item for item in empleados if item["nombre"] not in bloqueos_dia + bloqueos_puesto]
             nuevo_puesto["empleados_disponibles"] = empleados_habilitados
             puestos_con_disponibilidad.append(nuevo_puesto)
 
@@ -167,8 +186,20 @@ if __name__ == "__main__":
                 G.add_node(persona, bipartite=1)
         
         for puesto, personas in objetos_grafo.items():
+            print('\n   '+puesto)
             for persona in personas:
-                G.add_edge(puesto, persona, weight=50)
+                peso = calcular_peso_persona(
+                    next((empleado for empleado in empleados if empleado['nombre'] == persona), None),
+                    next((p for p in PUESTOS if p['nombre'] == puesto), None),
+                    len(cronograma)
+                )
+                empleadofull = next((empleado for empleado in empleados if empleado['nombre'] == persona), None)
+                print(f'      {persona}: {str(peso)}, {empleadofull['descansos']}, {empleadofull['dias_sin_descanso']}, {empleadofull['turnos_dia']}, {empleadofull['turnos_noche']}')
+                G.add_edge(
+                    puesto, 
+                    persona, 
+                    weight=peso
+                )
 
         matching = nx.algorithms.matching.max_weight_matching(G, maxcardinality=True)
 
