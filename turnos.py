@@ -1,6 +1,8 @@
 import datetime
 import pandas as pd
 import networkx as nx
+import sys
+import os
 
 def get_excel_column_name(column_number):
     column_name = ""
@@ -22,6 +24,7 @@ def crear_clase_empleado (e):
         "turnos_noche": 0,
         "descansos": 0,
         'dias_sin_descanso': 0,
+        'ultimo_turno': None,  # 'dia', 'noche', o None si descansó
         'bloqueos_dia': e['bloqueos_dia'],
         'bloqueos_noche': e['bloqueos_noche'],
         'puestos_habilitados': e['puestos_habilitados']
@@ -40,8 +43,10 @@ def actualizar_empleados (empleados, nombre, nocturno):
             objeto_modificado = empleado.copy()
             if nocturno:
                 objeto_modificado["turnos_noche"] += 1
+                objeto_modificado["ultimo_turno"] = 'noche'
             else:
                 objeto_modificado["turnos_dia"] += 1
+                objeto_modificado["ultimo_turno"] = 'dia'
             actualizados.append(objeto_modificado)
         else:
             actualizados.append(empleado)
@@ -49,272 +54,409 @@ def actualizar_empleados (empleados, nombre, nocturno):
 
 def actualizar_descansos (empleados, dia, dia_anterior, dia_siguiente, PUESTOS):
     """
-    Actualiza descansos según la nueva lógica:
-    - Un día se considera descanso si: ese día no hay turnos asignados Y el día anterior no se trabajó nocturno
-    - También será descanso si: ese día no se trabajó Y al día siguiente no se trabaja diurno
+    Actualiza los descansos de los empleados.
+    Condición idéntica a Excel: Un día es descanso si:
+    (no trabajar ese día Y no trabajar la noche anterior) O (no trabajar ese día Y no trabajar el día siguiente)
     """
+    puestos_nocturnos = [item for item in PUESTOS if item["nocturno"]]
+    puestos_diurnos = [item for item in PUESTOS if not item["nocturno"]]
     actualizados = []
+    
+    # Empleados que trabajan en el día actual (cualquier turno)
+    empleados_dia_actual = list(dia.values())
+    empleados_dia_actual = [e for e in empleados_dia_actual if e is not None]
+    
+    # Empleados que trabajan en turnos nocturnos del día anterior
+    empleados_nocturno_anterior = []
+    if dia_anterior:
+        for puesto in puestos_nocturnos:
+            empleado = dia_anterior.get(puesto["nombre"])
+            if empleado:
+                empleados_nocturno_anterior.append(empleado)
+    
+    # Empleados que trabajan en turnos diurnos del día siguiente
+    empleados_diurno_siguiente = []
+    if dia_siguiente:
+        for puesto in puestos_diurnos:
+            empleado = dia_siguiente.get(puesto["nombre"])
+            if empleado:
+                empleados_diurno_siguiente.append(empleado)
+    
+    for empleado in empleados:
+        nombre_empleado = empleado["nombre"]
+        
+        # Verificar si no trabaja el día actual
+        no_trabaja_hoy = nombre_empleado not in empleados_dia_actual
+        
+        if no_trabaja_hoy:
+            # Condición 1: no trabajar hoy Y no trabajar la noche anterior
+            nocturno_anterior_libre = nombre_empleado not in empleados_nocturno_anterior
+            condicion1 = nocturno_anterior_libre  # Si no hay día anterior, se considera libre (True)
+            
+            # Condición 2: no trabajar hoy Y no trabajar el día siguiente (diurno)
+            diurno_siguiente_libre = nombre_empleado not in empleados_diurno_siguiente
+            condicion2 = diurno_siguiente_libre  # Si no hay día siguiente, se considera libre (True)
+            
+            # Es día libre si cumple AL MENOS UNA de las dos condiciones (OR)
+            es_dia_libre = condicion1 or condicion2
+            
+            if es_dia_libre:
+                objeto_modificado = empleado.copy()
+                objeto_modificado["descansos"] += 1
+                objeto_modificado['dias_sin_descanso'] = 0
+                objeto_modificado['ultimo_turno'] = None  # Resetear al descansar
+                actualizados.append(objeto_modificado)
+            else:
+                # No es día libre según la condición, pero no trabajó hoy
+                objeto_modificado = empleado.copy()
+                objeto_modificado['dias_sin_descanso'] += 1
+                actualizados.append(objeto_modificado)
+        else:
+            # Trabajó hoy
+            objeto_modificado = empleado.copy()
+            objeto_modificado['dias_sin_descanso'] += 1
+            actualizados.append(objeto_modificado)
+    
+    return actualizados
+
+def es_descanso_valido(empleado_nombre, dia_intermedio, dia_anterior_intermedio, dia_siguiente_intermedio, PUESTOS, trabajara_diurno_hoy=None):
+    """
+    Verifica si un día fue descanso válido para un empleado.
+    Un día es descanso válido si:
+    (no trabajar ese día Y no trabajar la noche anterior) O (no trabajar ese día Y no trabajar el día siguiente)
+    """
     puestos_nocturnos = [item for item in PUESTOS if item["nocturno"]]
     puestos_diurnos = [item for item in PUESTOS if not item["nocturno"]]
     
-    # Obtener empleados asignados a puestos del día actual
-    empleados_dia = [dia[puesto["nombre"]] for puesto in PUESTOS if dia.get(puesto["nombre"]) is not None]
+    # Verificar si el empleado trabajó ese día (cualquier turno)
+    empleado_trabajo_ese_dia = False
+    for puesto_nombre in dia_intermedio:
+        if puesto_nombre != 'fecha' and dia_intermedio[puesto_nombre] == empleado_nombre:
+            empleado_trabajo_ese_dia = True
+            break
     
-    # Obtener empleados que trabajaron en puestos nocturnos el día anterior
-    empleados_dia_anterior_nocturno = []
-    if dia_anterior:
-        empleados_dia_anterior_nocturno = [dia_anterior[puesto["nombre"]] for puesto in puestos_nocturnos if dia_anterior.get(puesto["nombre"]) is not None]
+    # Si trabajó ese día, no es descanso
+    if empleado_trabajo_ese_dia:
+        return False
     
-    # Obtener empleados que trabajarán en puestos diurnos el día siguiente
-    empleados_dia_siguiente_diurno = []
-    if dia_siguiente:
-        empleados_dia_siguiente_diurno = [dia_siguiente[puesto["nombre"]] for puesto in puestos_diurnos if dia_siguiente.get(puesto["nombre"]) is not None]
+    # Condición 1: no trabajar ese día Y no trabajar la noche anterior
+    nocturno_anterior_libre = True
+    if dia_anterior_intermedio:
+        for puesto in puestos_nocturnos:
+            if dia_anterior_intermedio.get(puesto["nombre"]) == empleado_nombre:
+                nocturno_anterior_libre = False
+                break
+    condicion1 = nocturno_anterior_libre
     
-    for empleado in empleados:
-        objeto_modificado = empleado.copy()
-        nombre = empleado["nombre"]
-        trabajo_hoy = nombre in empleados_dia
-        trabajo_ayer_nocturno = nombre in empleados_dia_anterior_nocturno if dia_anterior else False
-        trabajo_manana_diurno = nombre in empleados_dia_siguiente_diurno if dia_siguiente else False
-        
-        if trabajo_hoy:
-            # El empleado trabajó hoy: no descansa, incrementa días sin descanso
-            objeto_modificado['dias_sin_descanso'] += 1
-        else:
-            # El empleado no trabajó hoy: verificar si es descanso según las nuevas reglas
-            es_descanso = False
-            
-            # Condición 1: Ese día no hay turnos asignados Y el día anterior no se trabajó nocturno
-            # SOLO aplicar si hay día anterior (no es el primer día)
-            if dia_anterior:
-                condicion1 = not trabajo_ayer_nocturno
-                if condicion1:
-                    es_descanso = True
-            
-            # Condición 2: Ese día no se trabajó Y al día siguiente no se trabaja diurno
-            # SOLO aplicar si hay día siguiente (no es el último día)
-            if dia_siguiente:
-                condicion2 = not trabajo_manana_diurno
-                if condicion2:
-                    es_descanso = True
-            
-            if es_descanso:
-                objeto_modificado["descansos"] += 1
-                objeto_modificado['dias_sin_descanso'] = 0
-            else:
-                # No es descanso según las reglas, pero incrementa días sin descanso
-                objeto_modificado['dias_sin_descanso'] += 1
-        
-        actualizados.append(objeto_modificado)
+    # Condición 2: no trabajar ese día Y no trabajar el día siguiente (diurno)
+    if trabajara_diurno_hoy is not None:
+        # Si se especifica explícitamente si trabajará diurno hoy, usar esa información
+        diurno_siguiente_libre = not trabajara_diurno_hoy
+    else:
+        # Verificar en el cronograma del día siguiente
+        diurno_siguiente_libre = True
+        if dia_siguiente_intermedio:
+            for puesto in puestos_diurnos:
+                if dia_siguiente_intermedio.get(puesto["nombre"]) == empleado_nombre:
+                    diurno_siguiente_libre = False
+                    break
+    condicion2 = diurno_siguiente_libre
     
-    return actualizados
+    # Es descanso válido si cumple AL MENOS UNA de las dos condiciones
+    return condicion1 or condicion2
 
 def formatear_fecha (fecha):
     return fecha.date()
 
-def calcular_peso_persona (empleado, puesto, dias, promedio_turnos=None, ajuste_equidad=None, promedio_descansos=None, desviacion_descansos=None):
-    # Peso base MUY alto para incentivar asignaciones (turno vacío es última opción)
-    # Debe ser lo suficientemente alto para que cualquier asignación sea mejor que vacío
-    peso_base = 10000
+def calcular_peso_persona (
+    empleado,
+    puesto,
+    dias,
+    todos_empleados=None,
+    empleados_disponibles_puesto=None,
+    cronograma=None,
+    dia_idx=None,
+    PUESTOS=None,
+):
+    peso_base = 10
     dias_trabajados = empleado['turnos_dia'] + empleado['turnos_noche']
-    nocturno = puesto['nocturno']
-    
-    # Incentivo base para asignar (siempre positivo para preferir asignación sobre vacío)
-    incentivo_asignacion = 1000
-    
-    # PENALIZACIÓN CRÍTICA: Si nunca descansa (descansos = 0 y tiene turnos)
-    # Esto es prioritario: evitar que alguien trabaje todos los días
-    penalizacion_sin_descansos = 0
-    if dias_trabajados > 0 and empleado['descansos'] == 0:
-        # Nunca ha descansado: PENALIZACIÓN MUY ALTA para forzar descanso
-        penalizacion_sin_descansos = -50000  # Penalización extrema
-        # Penalización adicional por cada día trabajado sin descanso
-        penalizacion_sin_descansos -= dias_trabajados * 10000
-    
-    # INCENTIVO MUY FUERTE: Si tiene más descansos que turnos trabajados
-    # Este es un caso extremo de desequilibrio - debe trabajar MÁS, no menos
-    # A MÁS DESCANSOS, MÁS DEBE SER ELEGIBLE PARA TRABAJAR
-    incentivo_descansos_vs_turnos = 0
-    if empleado['descansos'] > dias_trabajados:
-        # Tiene más descansos que turnos: INCENTIVO MUY ALTO para trabajar
-        diferencia_absoluta = empleado['descansos'] - dias_trabajados
-        # Incentivo exponencial: cada descanso extra sobre turnos trabajados se incentiva fuertemente
-        incentivo_descansos_vs_turnos = diferencia_absoluta * 20000  # MUY alto incentivo
-        # Incentivo adicional si la diferencia es grande
-        if diferencia_absoluta > 2:
-            incentivo_descansos_vs_turnos += (diferencia_absoluta - 2) * 30000  # Incentivo extremo
-        # Si tiene más del doble de descansos que turnos, incentivo aún mayor
-        if empleado['descansos'] > dias_trabajados * 2:
-            incentivo_descansos_vs_turnos += (empleado['descansos'] - dias_trabajados * 2) * 50000
-    
-    # Proporción ideal: 5 días trabajo / 2 días descanso = ratio 0.4 (2/5)
-    # Si tiene muchos descansos, incentivar MUY fuertemente asignación
-    # Penalizar MUY fuertemente el exceso de descansos
+    nocturno=puesto['nocturno']
+    # Que baja el peso:  pocos dias de descanso, muchos dias seguidos, muchos turnos de este horario
+
+    # Dias de descanso el balance debe ser de 2 dias de descanso por 5 de trabajo. En la proporción cada dia representa 0.2 y el valor ideal es 0.4.
+    # Cuando se trabaja mucho (ratio bajo), se debe desincentivar trabajar más (peso más bajo = variable negativa)
+    # PENALIZACIÓN MUY ALTA para empleados con 0 días trabajados
     if (dias_trabajados == 0):
-        # Empleado sin turnos: MUY alta prioridad para asignar
-        variable_por_descansos = 5000
+        variable_por_descansos = 100  # Aumentado de 5 a 100 para evitar empleados con 0 días trabajados
     else:
-        ratio_descansos = empleado['descansos'] / dias_trabajados
-        ratio_ideal = 0.4  # 2 descansos por 5 trabajos
-        
-        if ratio_descansos > ratio_ideal:
-            # Tiene demasiados descansos: incentivar MUY fuertemente asignación
-            # Aumentar exponencialmente con el exceso de descansos
-            exceso_descansos = ratio_descansos - ratio_ideal
-            variable_por_descansos = exceso_descansos * 5000  # Aumentado de 2000 a 5000
-            # Bonus adicional si el exceso es muy grande
-            if exceso_descansos > 0.2:
-                variable_por_descansos += (exceso_descansos - 0.2) * 10000  # Aumentado de 3000 a 10000
-            # Bonus adicional por número absoluto de descansos excesivos
-            descansos_excesivos = empleado['descansos'] - (dias_trabajados * ratio_ideal)
-            if descansos_excesivos > 2:
-                variable_por_descansos += descansos_excesivos * 3000  # Penalización adicional por cada descanso extra
-        else:
-            # Tiene pocos descansos: desincentivar (pero menos que antes para no penalizar demasiado)
-            variable_por_descansos = (ratio_descansos - ratio_ideal) * 100
+        # Corregido: la fórmula original estaba invertida. 
+        # Cuando ratio es bajo (trabaja mucho, pocos descansos) → variable debe ser negativa para bajar peso y desincentivar
+        # Cuando ratio es alto (descansa mucho) → variable debe ser positiva para subir peso e incentivar
+        ratio_descansos = empleado['descansos'] / (empleado['turnos_dia'] + empleado['turnos_noche'])
+        # Fórmula corregida (invertida): (0.4 - ratio) * -10 es equivalente a (ratio - 0.4) * 10
+        # pero escrita de forma invertida para claridad
+        variable_por_descansos = (0.4 - ratio_descansos) * -10
     
-    # Penalización por trabajar más de 5 días seguidos (ALTA PENALIZACIÓN)
-    # También penalizar si tiene muchos días seguidos mientras otros descansan
-    dias_sin_descanso = empleado['dias_sin_descanso']
+    # Balanceo de descansos: penalizar si tiene muchos más descansos que el promedio
+    variable_balance_descansos = 0
+    if todos_empleados and len(todos_empleados) > 1:
+        # Calcular promedio de descansos
+        total_descansos = sum(e['descansos'] for e in todos_empleados)
+        promedio_descansos = total_descansos / len(todos_empleados)
+        # Si tiene más descansos que el promedio, penalizar (incentivar a trabajar)
+        diferencia_descansos = empleado['descansos'] - promedio_descansos
+        if diferencia_descansos > 0:
+            # Penalizar proporcionalmente (más descansos = más penalización) - AUMENTADO
+            variable_balance_descansos = -diferencia_descansos * 10  # Aumentado de 3 a 10
+    
+    # Dias de trabajo seguidos (streak real calculado desde el cronograma)
+    # OJO: en este algoritmo, empleado['dias_sin_descanso'] se actualiza al final, así que NO sirve
+    # para influir decisiones durante el armado. Por eso lo calculamos dinámicamente aquí.
+    dias_seguidos_trabajados = None
+    if cronograma is not None and dia_idx is not None:
+        streak = 0
+        for j in range(dia_idx - 1, -1, -1):
+            dia_verificar = cronograma[j]
+            trabajo = False
+            for puesto_nombre in dia_verificar:
+                if puesto_nombre != 'fecha' and dia_verificar[puesto_nombre] == empleado['nombre']:
+                    trabajo = True
+                    break
+            if trabajo:
+                streak += 1
+            else:
+                break
+        dias_seguidos_trabajados = streak
+    else:
+        dias_seguidos_trabajados = empleado.get('dias_sin_descanso', 0)
+
+    # Penalización progresiva para desincentivar llegar a 5 días seguidos
+    # + INCENTIVOS AUMENTADOS para consolidar bloques más largos (1-3 días) sin empujar a violar la regla de 5.
+    dias_sin_descanso = dias_seguidos_trabajados
     if dias_sin_descanso >= 6:
-        # Ya trabajó más de 5 días seguidos: penalización MUY alta
-        dias_extra = dias_sin_descanso - 5  # Días por encima del límite de 5
-        variable_por_trabajos = -dias_extra * 5000  # Penalización MUY alta
+        variable_por_trabajos = -200  # Penalización muy alta después de 5 días (casi imposible de seleccionar)
     elif dias_sin_descanso == 5:
-        # Está en el límite (5 días): penalización MUY alta para evitar el día 6
-        variable_por_trabajos = -3000
+        variable_por_trabajos = -100  # Penalización muy alta al llegar a 5 días
     elif dias_sin_descanso == 4:
-        # Está cerca del límite: desincentivar fuertemente
-        variable_por_trabajos = -500
+        variable_por_trabajos = -50   # Penalización alta para desincentivar llegar a 5
     elif dias_sin_descanso == 3:
-        # Está trabajando varios días: desincentivar ligeramente si otros descansan mucho
-        variable_por_trabajos = -100
+        variable_por_trabajos = 15    # INCENTIVO AUMENTADO: continuar el bloque (aumentado de -20 a +15)
+    elif dias_sin_descanso == 2:
+        variable_por_trabajos = 25    # INCENTIVO AUMENTADO: continuar el bloque (aumentado de 5 a 25)
+    elif dias_sin_descanso == 1:
+        variable_por_trabajos = 20    # INCENTIVO AUMENTADO: empezar a formar un bloque (aumentado de 3 a 20)
     else:
-        # Puede trabajar más días: incentivar si tiene pocos turnos
-        variable_por_trabajos = max(0, (4 - dias_sin_descanso) * 10)
+        variable_por_trabajos = 0     # Sin penalización ni incentivo para 0 días
+
+    # Variable por disparidad entre jornadas
+    # Cuando ya se trabajó mucho de este tipo de turno, se debe desincentivar trabajar más (peso más bajo = variable negativa)
+    # PERO incentivamos cambio de jornada después de descanso
+    # PENALIZACIÓN MUY AGRESIVA para evitar que empleados terminen con 0 turnos de un tipo
+    variable_jornadas = 0
+    turnos_dia = empleado['turnos_dia']
+    turnos_noche = empleado['turnos_noche']
     
-    # Variable por disparidad entre jornadas (incentivar balance) - REDUCIDA para priorizar descansos
-    if nocturno:
-        variable_jornadas = (empleado['turnos_dia'] - empleado['turnos_noche']) * 0.5
-    else:
-        variable_jornadas = (empleado['turnos_noche'] - empleado['turnos_dia']) * 0.5
-    
-    # Penalización adicional si la proporción trabajo/descanso está muy desbalanceada
-    if dias_trabajados > 0:
-        ratio_actual = empleado['descansos'] / dias_trabajados
-        desbalance = abs(ratio_actual - 0.4)
-        if desbalance > 0.2:  # Si está muy desbalanceado (más de 20% de diferencia)
-            penalizacion_desbalance = -desbalance * 200
+    # CASO CRÍTICO: Si tiene 0 turnos de un tipo, penalización EXTREMADAMENTE ALTA para el tipo que ya tiene
+    # Esto debe ser tan alto que prácticamente bloquee la asignación a menos que no haya otra opción
+    if turnos_dia == 0 and nocturno:
+        # Tiene 0 diurnos y se le está ofreciendo otro nocturno - PENALIZACIÓN EXTREMADAMENTE ALTA
+        variable_jornadas = -500  # Aumentado de -100 a -500
+    elif turnos_noche == 0 and not nocturno:
+        # Tiene 0 nocturnos y se le está ofreciendo otro diurno - PENALIZACIÓN EXTREMADAMENTE ALTA
+        variable_jornadas = -500  # Aumentado de -100 a -500
+    elif turnos_dia == 0 and not nocturno:
+        # Tiene 0 diurnos y se le ofrece un diurno - INCENTIVO MUY ALTO
+        # Si hay múltiples empleados con 0 diurnos, normalizar pesos para distribución equitativa
+        if todos_empleados:
+            num_empleados_0_diurnos = sum(1 for e in todos_empleados if e['turnos_dia'] == 0)
+            if num_empleados_0_diurnos > 1:
+                # Base fija para que todos tengan pesos similares
+                variable_jornadas = 200
+                # Pequeño ajuste basado en turnos nocturnos para evitar empates exactos
+                # pero mantener pesos muy cercanos para distribución equitativa
+                variable_jornadas += empleado['turnos_noche'] * 3  # Muy pequeño para mantener similitud
+            else:
+                # Solo un empleado con 0 diurnos, incentivo normal más alto
+                variable_jornadas = 200 + (empleado['turnos_noche'] * 20)
         else:
-            penalizacion_desbalance = 0
-    else:
-        penalizacion_desbalance = 0
-    
-    # Incentivo por equidad: si el empleado tiene menos turnos que el promedio, incentivar asignación
-    # Penalización fuerte si tiene más turnos que el promedio
-    # También considerar descansos en la equidad
-    incentivo_equidad = 0
-    if promedio_turnos is not None:
-        diferencia_turnos = promedio_turnos - dias_trabajados
-        
-        # Calcular promedio de descansos para equidad
-        # (esto se puede mejorar calculando el promedio real de descansos)
-        promedio_descansos_estimado = promedio_turnos * 0.4  # Ratio ideal
-        diferencia_descansos = promedio_descansos_estimado - empleado['descansos']
-        
-        if diferencia_turnos > 0.1:  # Tiene al menos 0.1 turnos menos que el promedio
-            # Tiene menos turnos que el promedio: incentivar MUY fuertemente
-            # Aumentar el incentivo exponencialmente con la diferencia
-            incentivo_equidad = diferencia_turnos * 5000  # Aumentado de 2000 a 5000
-            # Bonus adicional si la diferencia es grande
-            if diferencia_turnos > 1:
-                incentivo_equidad += (diferencia_turnos - 1) * 10000  # Aumentado de 3000 a 10000
-            # Bonus adicional por descansos excesivos
-            if diferencia_descansos < -2:  # Tiene más de 2 descansos que el promedio
-                incentivo_equidad += abs(diferencia_descansos) * 5000
-            # BONUS EXTREMO: Si tiene más descansos que turnos trabajados
-            if empleado['descansos'] > dias_trabajados:
-                diferencia_extrema = empleado['descansos'] - dias_trabajados
-                incentivo_equidad += diferencia_extrema * 25000  # Incentivo MUY alto para trabajar
-        elif diferencia_turnos < -0.1:
-            # Tiene más turnos que el promedio: penalizar MUY fuertemente
-            # Penalización exponencial para evitar desequilibrios
-            incentivo_equidad = diferencia_turnos * 5000  # Aumentado de 3000 a 5000
-            # Penalización adicional si la diferencia es grande
-            if diferencia_turnos < -1:
-                incentivo_equidad += (diferencia_turnos + 1) * 10000  # Aumentado de 5000 a 10000
-        elif dias_trabajados == 0 and promedio_turnos == 0:
-            # Al inicio cuando todos tienen 0, dar incentivo base para equidad
-            incentivo_equidad = 1000
-        elif dias_trabajados == 0 and promedio_turnos > 0:
-            # Si no ha trabajado nada pero otros sí: incentivo muy alto
-            incentivo_equidad = promedio_turnos * 8000  # Aumentado de 3000 a 8000
-        elif diferencia_descansos < -3:  # Tiene más de 3 descansos que el promedio estimado
-            # Penalización adicional por exceso de descansos incluso si los turnos están balanceados
-            incentivo_equidad += abs(diferencia_descansos) * 4000
-    
-    # Ajuste basado en promedio y desviación de descansos (minimizar ambos)
-    # PRIORIDAD ALTA: Asegurar que todos descansen la misma cantidad de días
-    ajuste_descansos_balance = 0
-    if promedio_descansos is not None and desviacion_descansos is not None:
-        # Si el empleado tiene menos descansos que el promedio, incentivar asignación
-        # (para que otros descansen más y reduzcamos el promedio)
-        diferencia_descansos_promedio = promedio_descansos - empleado['descansos']
-        
-        if diferencia_descansos_promedio > 0:
-            # Tiene menos descansos que el promedio: incentivar trabajar para que otros descansen más
-            # Esto ayuda a reducir el promedio total de descansos y lograr equidad
-            ajuste_descansos_balance = diferencia_descansos_promedio * 8000  # Aumentado de 2000 a 8000
-            # Bonus exponencial si la diferencia es grande
-            if diferencia_descansos_promedio > 1:
-                ajuste_descansos_balance += (diferencia_descansos_promedio - 1) * 12000
+            variable_jornadas = 200
+    elif turnos_noche == 0 and nocturno:
+        # Tiene 0 nocturnos y se le ofrece un nocturno - INCENTIVO MUY ALTO
+        # Si hay múltiples empleados con 0 nocturnos, normalizar pesos para distribución equitativa
+        if todos_empleados:
+            num_empleados_0_nocturnos = sum(1 for e in todos_empleados if e['turnos_noche'] == 0)
+            if num_empleados_0_nocturnos > 1:
+                # Base fija para que todos tengan pesos similares
+                variable_jornadas = 200
+                # Pequeño ajuste basado en turnos diurnos para evitar empates exactos
+                variable_jornadas += empleado['turnos_dia'] * 3  # Muy pequeño para mantener similitud
+            else:
+                # Solo un empleado con 0 nocturnos, incentivo normal más alto
+                variable_jornadas = 200 + (empleado['turnos_dia'] * 20)
         else:
-            # Tiene más descansos que el promedio: INCENTIVAR MUY FUERTEMENTE trabajar
-            # A MÁS DESCANSOS, MÁS DEBE TRABAJAR para balancear
-            diferencia_absoluta = abs(diferencia_descansos_promedio)
-            ajuste_descansos_balance = diferencia_absoluta * 10000  # INCENTIVO alto (antes era penalización)
-            # Incentivo exponencial si la diferencia es grande
-            if diferencia_absoluta > 1:
-                ajuste_descansos_balance += (diferencia_absoluta - 1) * 15000  # Incentivo extremo
-        
-        # INCENTIVO por estar lejos del promedio si tiene muchos descansos
-        # Si tiene muchos descansos y está lejos del promedio, incentivar trabajar más
-        if diferencia_descansos_promedio < 0 and abs(diferencia_descansos_promedio) > desviacion_descansos:
-            # Tiene más descansos que el promedio y está muy lejos: incentivar trabajar
-            ajuste_descansos_balance += abs(diferencia_descansos_promedio - desviacion_descansos) * 10000
-        
-        # Incentivo adicional si tiene muchos descansos (equidad estricta)
-        # A más descansos, más incentivo para trabajar
-        if diferencia_descansos_promedio < -0.5:  # Si tiene más de medio día de descansos que el promedio
-            ajuste_descansos_balance += abs(diferencia_descansos_promedio) * 8000
+            variable_jornadas = 200
+    else:
+        # Caso normal: penalizar según el desbalance, pero de forma MUY AGRESIVA
+        # La penalización crece exponencialmente con la diferencia para evitar casos extremos
+        if nocturno:
+            diferencia = turnos_noche - turnos_dia
+            if diferencia > 0:
+                # Penalización base más agresiva: multiplicar por 100 (aumentado de 20)
+                variable_jornadas = -diferencia * 100
+                # Penalización escalonada que crece rápidamente
+                if diferencia > 1:
+                    variable_jornadas = -diferencia * 200  # Diferencia de 2 o más
+                if diferencia > 2:
+                    variable_jornadas = -diferencia * 400  # Diferencia de 3 o más
+                if diferencia > 3:
+                    variable_jornadas = -diferencia * 800  # Diferencia de 4 o más
+                if diferencia > 4:
+                    variable_jornadas = -diferencia * 1500  # Diferencia de 5 o más
+                if diferencia > 5:
+                    variable_jornadas = -diferencia * 3000  # Diferencia de 6 o más
+            else:
+                # Si tiene más diurnos que nocturnos, incentivar para balancear
+                variable_jornadas = abs(diferencia) * 100  # Aumentado de 20 a 100
+        else:
+            diferencia = turnos_dia - turnos_noche
+            if diferencia > 0:
+                # Penalización base más agresiva: multiplicar por 100 (aumentado de 20)
+                variable_jornadas = -diferencia * 100
+                # Penalización escalonada que crece rápidamente
+                if diferencia > 1:
+                    variable_jornadas = -diferencia * 200  # Diferencia de 2 o más
+                if diferencia > 2:
+                    variable_jornadas = -diferencia * 400  # Diferencia de 3 o más
+                if diferencia > 3:
+                    variable_jornadas = -diferencia * 800  # Diferencia de 4 o más
+                if diferencia > 4:
+                    variable_jornadas = -diferencia * 1500  # Diferencia de 5 o más
+                if diferencia > 5:
+                    variable_jornadas = -diferencia * 3000  # Diferencia de 6 o más
+            else:
+                # Si tiene más nocturnos que diurnos, incentivar para balancear
+                variable_jornadas = abs(diferencia) * 100  # Aumentado de 20 a 100
     
-    # Ajuste adicional basado en desequilibrios de iteraciones anteriores
-    # PRIORIDAD ALTA: Corregir desequilibrios de descansos detectados en iteraciones previas
-    ajuste_iterativo = 0
-    if ajuste_equidad is not None and empleado['nombre'] in ajuste_equidad:
-        # Ajustar peso basándose en desequilibrios previos
-        ajuste_info = ajuste_equidad[empleado['nombre']]
-        diferencia_descansos_abs = ajuste_info.get('diferencia_descansos_abs', 0)
+    # INCENTIVO: Cambio de jornada después de descanso
+    # Si hay un descanso válido entre el último turno del tipo opuesto y hoy,
+    # y el turno de HOY es del tipo opuesto, dar incentivo.
+    variable_cambio_jornada = 0
+    if cronograma is not None and dia_idx is not None and dia_idx > 0 and PUESTOS is not None:
+        # Buscar el último turno del tipo opuesto trabajado
+        puestos_nocturnos = [p for p in PUESTOS if p['nocturno']]
+        puestos_diurnos = [p for p in PUESTOS if not p['nocturno']]
+        puestos_tipo_opuesto = puestos_diurnos if nocturno else puestos_nocturnos
         
-        # Si tenía muchos descansos o pocos turnos, aumentar incentivo MUY fuertemente
-        if ajuste_info.get('muchos_descansos', False) or ajuste_info.get('pocos_turnos', False):
-            ajuste_iterativo = ajuste_info.get('factor_ajuste', 0) * 5000  # Aumentado de 1000 a 5000
-            # Bonus adicional si el problema es específicamente de descansos
-            if ajuste_info.get('muchos_descansos', False):
-                ajuste_iterativo += diferencia_descansos_abs * 8000  # Usar diferencia absoluta para ajuste más preciso
-        # Si tenía pocos descansos o muchos turnos, reducir incentivo MUY fuertemente
-        elif ajuste_info.get('pocos_descansos', False) or ajuste_info.get('muchos_turnos', False):
-            ajuste_iterativo = -ajuste_info.get('factor_ajuste', 0) * 4000  # Aumentado de 500 a 4000
-            # Penalización adicional si el problema es específicamente de descansos
-            if ajuste_info.get('pocos_descansos', False):
-                ajuste_iterativo -= diferencia_descansos_abs * 6000  # Usar diferencia absoluta para ajuste más preciso
+        ultimo_dia_tipo_opuesto = None
+        ultimo_tipo = None
+        
+        # Buscar el último día que trabajó el tipo opuesto
+        for j in range(dia_idx - 1, -1, -1):
+            dia_verificar = cronograma[j]
+            trabajo_tipo_opuesto = False
+            puesto_encontrado = None
+            
+            for p_opuesto in puestos_tipo_opuesto:
+                if dia_verificar.get(p_opuesto["nombre"]) == empleado['nombre']:
+                    trabajo_tipo_opuesto = True
+                    puesto_encontrado = p_opuesto["nombre"]
+                    ultimo_dia_tipo_opuesto = j
+                    break
+            
+            if trabajo_tipo_opuesto:
+                ultimo_tipo = 'noche' if nocturno else 'dia'  # El tipo opuesto al que se le está ofreciendo
+                break
+        
+        # Si encontró un turno del tipo opuesto, verificar si hay descanso válido
+        if ultimo_dia_tipo_opuesto is not None:
+            hay_descanso_valido = False
+            
+            # Verificar todos los días intermedios entre el último turno del tipo opuesto y hoy
+            for dia_intermedio_idx in range(ultimo_dia_tipo_opuesto + 1, dia_idx):
+                dia_intermedio = cronograma[dia_intermedio_idx]
+                dia_anterior_intermedio = cronograma[dia_intermedio_idx - 1] if dia_intermedio_idx > 0 else None
+                dia_siguiente_intermedio = cronograma[dia_intermedio_idx + 1] if dia_intermedio_idx < len(cronograma) - 1 else None
+                
+                # Si es el día inmediatamente anterior a hoy, usar la información de que trabajará hoy
+                if dia_intermedio_idx == dia_idx - 1:
+                    if es_descanso_valido(empleado['nombre'], dia_intermedio,
+                                         dia_anterior_intermedio, dia_siguiente_intermedio, PUESTOS,
+                                         trabajara_diurno_hoy=not nocturno):
+                        hay_descanso_valido = True
+                        break
+                else:
+                    # Para días intermedios que no son el último, verificar normalmente
+                    if es_descanso_valido(empleado['nombre'], dia_intermedio,
+                                         dia_anterior_intermedio, dia_siguiente_intermedio, PUESTOS,
+                                         trabajara_diurno_hoy=None):
+                        hay_descanso_valido = True
+                        break
+            
+            # Si hay descanso válido y el turno de hoy es opuesto, aplicar incentivo
+            if hay_descanso_valido:
+                # Incentivo base por cambio de jornada después de descanso
+                variable_cambio_jornada = 300  # Aumentado de 100 a 300
+                # Aumentar el incentivo si hay desbalance significativo
+                diferencia = abs(empleado['turnos_dia'] - empleado['turnos_noche'])
+                if diferencia > 0:
+                    # Incentivo adicional proporcional al desbalance
+                    variable_cambio_jornada += diferencia * 150  # Aumentado de 50 a 150
+                # Incentivo extra si tiene muy pocos turnos de un tipo
+                if nocturno and empleado['turnos_dia'] < 3:
+                    variable_cambio_jornada += 500  # Aumentado de 200 a 500
+                elif not nocturno and empleado['turnos_noche'] < 3:
+                    variable_cambio_jornada += 500  # Aumentado de 200 a 500
+        else:
+            # Si no hay turno previo del tipo opuesto, pero hay desbalance, aplicar incentivo menor
+            # (esto cubre el caso de empleados que nunca han trabajado un tipo)
+            if empleado['turnos_dia'] > empleado['turnos_noche'] and nocturno:
+                # Incentivo alto si tiene más diurnos y se le ofrece nocturno
+                diferencia = empleado['turnos_dia'] - empleado['turnos_noche']
+                variable_cambio_jornada = 150 + (diferencia * 100)  # Aumentado de 50+30 a 150+100
+            elif empleado['turnos_noche'] > empleado['turnos_dia'] and not nocturno:
+                # Incentivo alto si tiene más nocturnos y se le ofrece diurno
+                diferencia = empleado['turnos_noche'] - empleado['turnos_dia']
+                variable_cambio_jornada = 150 + (diferencia * 100)  # Aumentado de 50+30 a 150+100
+            # Incentivo adicional si tiene muy pocos turnos de un tipo
+            if nocturno and empleado['turnos_dia'] < 3:
+                variable_cambio_jornada += 400  # Aumentado de 150 a 400
+            elif not nocturno and empleado['turnos_noche'] < 3:
+                variable_cambio_jornada += 400  # Aumentado de 150 a 400
     
-    peso_total = (peso_base + incentivo_asignacion + variable_por_descansos + 
-                   variable_por_trabajos + variable_jornadas + penalizacion_desbalance + 
-                   incentivo_equidad + incentivo_descansos_vs_turnos + ajuste_iterativo + 
-                   penalizacion_sin_descansos + ajuste_descansos_balance)
+    # Incentivo por especialización del empleado: menos puestos habilitados = más incentivo
+    # Empleados más especializados (menos puestos) deben tener prioridad
+    num_puestos_empleado = len(empleado.get('puestos_habilitados', []))
+    if num_puestos_empleado > 0:
+        # Incentivo inversamente proporcional: menos puestos = más incentivo
+        # Normalizar: si tiene 1 puesto, incentivo máximo; si tiene muchos, menos incentivo
+        # Usamos 1/num_puestos como base, multiplicado por un factor
+        variable_especializacion_empleado = (1.0 / num_puestos_empleado) * 5
+    else:
+        variable_especializacion_empleado = 0
     
-    return peso_total
+    # Incentivo por especialización del puesto: menos empleados disponibles = más incentivo
+    # Puestos que pueden ser cubiertos por menos empleados deben llenarse más rápido
+    if empleados_disponibles_puesto is not None:
+        num_empleados_puesto = len(empleados_disponibles_puesto)
+        if num_empleados_puesto > 0:
+            # Incentivo inversamente proporcional: menos empleados = más incentivo
+            # Normalizar: si solo 1 empleado puede cubrirlo, incentivo máximo
+            variable_especializacion_puesto = (1.0 / num_empleados_puesto) * 5
+        else:
+            variable_especializacion_puesto = 0
+    else:
+        variable_especializacion_puesto = 0
+
+    return (
+        peso_base
+        + variable_por_descansos
+        + variable_por_trabajos
+        + variable_jornadas
+        + variable_balance_descansos
+        + variable_especializacion_empleado
+        + variable_especializacion_puesto
+        + variable_cambio_jornada
+    )
 
 if __name__ == "__main__":
     # Carga de datos
@@ -357,382 +499,367 @@ if __name__ == "__main__":
     empleados = [crear_clase_empleado(e) for e in EMPLEADOS]
     cronograma = [cronograma_diario_vacio(dia, PUESTOS) for dia in dias]
 
-    # Precalcular bloqueos estáticos para todos los días
-    bloqueos_por_dia = []
     for i in range(len(cronograma)):
         dia = cronograma[i]
+        print('\n\n------'+dia['fecha'].strftime("%Y-%m-%d"))
         bloqueos_dia = []
         bloqueos_noche = []
         
-        # Bloqueos por cronograma
+        # Bloqueos
         for empleado in empleados:
+
+            # Bloqueo por cronograma
             if dia['fecha'] in empleado['bloqueos_dia']:
                 bloqueos_dia.append(empleado["nombre"])
             if dia['fecha'] in empleado['bloqueos_noche']:
                 bloqueos_noche.append(empleado["nombre"])
-        
-        bloqueos_por_dia.append({
-            'bloqueos_dia': bloqueos_dia,
-            'bloqueos_noche': bloqueos_noche
-        })
-    
-    # Sistema iterativo para mejorar equidad
-    max_iteraciones_equidad = 3
-    mejor_solucion = None
-    mejor_equidad_score = float('inf')
-    desequilibrios_previos = {}  # Guardar desequilibrios de iteraciones anteriores
-    
-    for iteracion_equidad in range(max_iteraciones_equidad):
-        if iteracion_equidad > 0:
             
-            # Reiniciar estados para nueva iteración
-            empleados = [crear_clase_empleado(e) for e in EMPLEADOS]
-            cronograma = [cronograma_diario_vacio(dia, PUESTOS) for dia in dias]
+            # Bloqueo obligatorio: no trabajar más de 5 días seguidos
+            # Calcular días seguidos trabajados directamente desde el cronograma
+            dias_seguidos_trabajados = 0
+            for j in range(i - 1, -1, -1):  # Retroceder desde el día anterior
+                dia_verificar = cronograma[j]
+                # Verificar si el empleado trabajó ese día (en cualquier puesto)
+                empleado_trabajo = False
+                for puesto_nombre in dia_verificar:
+                    if puesto_nombre != 'fecha' and dia_verificar[puesto_nombre] == empleado["nombre"]:
+                        empleado_trabajo = True
+                        break
+                
+                if empleado_trabajo:
+                    dias_seguidos_trabajados += 1
+                else:
+                    # Si no trabajó, verificar si fue día libre según la nueva condición
+                    # (esto requiere verificar el día anterior y siguiente, pero para simplificar,
+                    #  si no trabajó, consideramos que descansó)
+                    break
             
-            # Aplicar ajustes de pesos basados en desequilibrios previos
-            # Esto se hará modificando los pesos en calcular_peso_persona
-            # mediante un factor de ajuste por empleado
-        else:
-            # Primera iteración: empezar desde cero
-            empleados = [crear_clase_empleado(e) for e in EMPLEADOS]
-            cronograma = [cronograma_diario_vacio(dia, PUESTOS) for dia in dias]
+            # Si ya trabajó 5 días seguidos, bloquear
+            if dias_seguidos_trabajados >= 5:
+                # Bloquear para todos los turnos (diurnos y nocturnos)
+                if empleado["nombre"] not in bloqueos_dia:
+                    bloqueos_dia.append(empleado["nombre"])
+                if empleado["nombre"] not in bloqueos_noche:
+                    bloqueos_noche.append(empleado["nombre"])
+          
+        # Bloquear cambio de tipo de turno sin descanso válido
+        # Para cambiar de jornada (diurno a nocturno o viceversa) se requiere un día de descanso válido
+        puestos_nocturnos = [item for item in PUESTOS if item["nocturno"]]
+        puestos_diurnos = [item for item in PUESTOS if not item["nocturno"]]
         
-        # ========== CONSTRUIR GRAFO GLOBAL COMPLETO ==========
-        G_global = nx.Graph()
-        
-        # Crear nodos para todos los (puesto, dia)
-        for i in range(len(cronograma)):
-            for puesto in PUESTOS:
-                nodo_puesto_dia = (puesto['nombre'], i)
-                G_global.add_node(nodo_puesto_dia, bipartite=0, puesto=puesto['nombre'], dia=i, nocturno=puesto['nocturno'])
-        
-        # Crear nodos para todos los empleados
-        for empleado in empleados:
-            G_global.add_node(empleado['nombre'], bipartite=1)
-        
-        # Calcular promedio inicial para equidad (se actualizará iterativamente)
-        total_turnos = sum(e['turnos_dia'] + e['turnos_noche'] for e in empleados)
-        promedio_turnos = total_turnos / len(empleados) if len(empleados) > 0 else 0
-        
-        # Calcular promedio y desviación de descansos para balance
-        total_descansos = sum(e['descansos'] for e in empleados)
-        promedio_descansos = total_descansos / len(empleados) if len(empleados) > 0 else 0
-        # Calcular desviación estándar de descansos
-        if len(empleados) > 0:
-            varianza_descansos = sum((e['descansos'] - promedio_descansos) ** 2 for e in empleados) / len(empleados)
-            desviacion_descansos = varianza_descansos ** 0.5
-        else:
-            desviacion_descansos = 0
-        
-        # Agregar aristas considerando TODAS las restricciones
-        # Para la restricción noche->día, usamos un enfoque donde bloqueamos aristas
-        # que violarían esta restricción basándose en posibles asignaciones nocturnas previas
-        for j in range(len(cronograma)):
-            bloqueos_dia = bloqueos_por_dia[j]['bloqueos_dia'].copy()
-            bloqueos_noche = bloqueos_por_dia[j]['bloqueos_noche'].copy()
+        # Para cada puesto, verificar si algún empleado que trabajó el tipo opuesto puede trabajar aquí
+        for puesto in PUESTOS:
+            es_nocturno = puesto["nocturno"]
+            tipo_opuesto = "diurno" if es_nocturno else "nocturno"
+            puestos_tipo_opuesto = puestos_diurnos if es_nocturno else puestos_nocturnos
             
-            for puesto in PUESTOS:
-                nodo_puesto_dia = (puesto['nombre'], j)
-                es_nocturno = puesto["nocturno"]
+            # Buscar el último día que cada empleado trabajó el tipo opuesto
+            for empleado in empleados:
+                nombre_empleado = empleado["nombre"]
                 
-                # Bloqueo por puesto
-                bloqueos_puesto = [e['nombre'] for e in empleados if puesto['nombre'] not in e['puestos_habilitados']]
-                
-                # Para restricción noche->día: si es turno diurno (j > 0), 
-                # no podemos crear aristas para empleados que podrían trabajar noche en j-1
-                # Como no sabemos quién trabajará noche, bloqueamos preventivamente
-                # solo si hay una alta probabilidad de conflicto
-                
-                for empleado in empleados:
-                    bloqueado = False
+                # Buscar el último día que trabajó el tipo opuesto (hacia atrás desde hoy)
+                ultimo_dia_tipo_opuesto = None
+                for j in range(i - 1, -1, -1):  # Desde el día anterior hacia atrás
+                    dia_verificar = cronograma[j]
+                    trabajo_tipo_opuesto = False
                     
-                    # Bloqueo por puesto
-                    if empleado['nombre'] in bloqueos_puesto:
-                        bloqueado = True
+                    # Verificar si trabajó en algún puesto del tipo opuesto ese día
+                    for p_opuesto in puestos_tipo_opuesto:
+                        if dia_verificar.get(p_opuesto["nombre"]) == nombre_empleado:
+                            trabajo_tipo_opuesto = True
+                            ultimo_dia_tipo_opuesto = j
+                            break
                     
-                    # Bloqueos por cronograma (dia/noche)
-                    if not bloqueado:
-                        if es_nocturno:
-                            if empleado['nombre'] in bloqueos_noche:
-                                bloqueado = True
+                    if trabajo_tipo_opuesto:
+                        break
+                
+                # Si encontró un día donde trabajó el tipo opuesto, verificar que haya descanso válido
+                if ultimo_dia_tipo_opuesto is not None:
+                    # Verificar que haya al menos un día de descanso válido entre el último día del tipo opuesto y hoy
+                    hay_descanso_valido = False
+                    
+                    # Verificar todos los días intermedios
+                    for dia_intermedio_idx in range(ultimo_dia_tipo_opuesto + 1, i):
+                        dia_intermedio = cronograma[dia_intermedio_idx]
+                        dia_anterior_intermedio = cronograma[dia_intermedio_idx - 1] if dia_intermedio_idx > 0 else None
+                        dia_siguiente_intermedio = cronograma[dia_intermedio_idx + 1] if dia_intermedio_idx < len(cronograma) - 1 else None
+                        
+                        # Si es el día inmediatamente anterior a hoy, usar la información de que trabajará hoy
+                        if dia_intermedio_idx == i - 1:
+                            if es_descanso_valido(nombre_empleado, dia_intermedio,
+                                                 dia_anterior_intermedio, dia_siguiente_intermedio, PUESTOS,
+                                                 trabajara_diurno_hoy=not es_nocturno):
+                                hay_descanso_valido = True
+                                break
                         else:
-                            if empleado['nombre'] in bloqueos_dia:
-                                bloqueado = True
+                            # Para días intermedios que no son el último, verificar normalmente
+                            if es_descanso_valido(nombre_empleado, dia_intermedio,
+                                                 dia_anterior_intermedio, dia_siguiente_intermedio, PUESTOS,
+                                                 trabajara_diurno_hoy=None):
+                                hay_descanso_valido = True
+                                break
                     
-                    # Restricción noche->día: Para turnos diurnos, no crear arista si
-                    # el empleado podría estar trabajando noche el día anterior
-                    # Como no sabemos las asignaciones previas, usamos un enfoque conservador:
-                    # Solo bloqueamos si el empleado tiene alta probabilidad de trabajar noche anterior
-                    # basado en sus puestos habilitados
-                    if not bloqueado and not es_nocturno and j > 0:
-                        # Verificar si el empleado puede trabajar en puestos nocturnos
-                        puede_trabajar_noche = any(p['nombre'] in empleado['puestos_habilitados'] 
-                                                   for p in PUESTOS if p['nocturno'])
-                        # Si puede trabajar noche y no está bloqueado para noche el día anterior,
-                        # hay riesgo de conflicto. Usaremos pesos muy negativos en lugar de bloquear
-                        # para que el matching evite estas asignaciones
-                        if puede_trabajar_noche:
-                            # No bloqueamos, pero usaremos un peso muy bajo para desincentivar
-                            # Esta asignación se verificará después del matching
-                            pass  # Continuamos, pero el peso se ajustará
-                    
-                    # Agregar arista si no está bloqueado
-                    if not bloqueado:
-                        # Calcular peso inicial (se ajustará considerando restricciones dinámicas)
-                        # Pasar ajuste_equidad, promedio_descansos y desviacion_descansos
-                        peso = calcular_peso_persona(empleado, puesto, len(cronograma), promedio_turnos, 
-                                                     desequilibrios_previos, promedio_descansos, desviacion_descansos)
-                        
-                        # Ajuste de peso para restricción noche->día potencial
-                        # Si es turno diurno y el empleado puede trabajar noche, reducir peso ligeramente
-                        if not es_nocturno and j > 0:
-                            puede_trabajar_noche = any(p['nombre'] in empleado['puestos_habilitados'] 
-                                                       for p in PUESTOS if p['nocturno'])
-                            if puede_trabajar_noche:
-                                # Reducir peso para desincentivar (pero no bloquear completamente)
-                                peso = peso * 0.8
-                        
-                        G_global.add_edge(nodo_puesto_dia, empleado['nombre'], weight=peso)
+                    # Si no hay descanso válido, bloquear
+                    if not hay_descanso_valido:
+                        if es_nocturno and nombre_empleado not in bloqueos_noche:
+                            bloqueos_noche.append(nombre_empleado)
+                        elif not es_nocturno and nombre_empleado not in bloqueos_dia:
+                            bloqueos_dia.append(nombre_empleado)
         
-        # ========== RESOLVER GRAFO UNA SOLA VEZ ==========
-        matching_global = nx.algorithms.matching.max_weight_matching(G_global, maxcardinality=True)
+        puestos_con_disponibilidad = []
+        for puesto in PUESTOS:
+            nuevo_puesto = puesto.copy()
+            es_nocturno = puesto["nocturno"]
+            
+            #Bloqueo por puesto
+            bloqueos_puesto = [e['nombre'] for e in empleados if puesto['nombre'] not in e['puestos_habilitados']]
+            #Empleados habilitados
+            empleados_habilitados = []
+            if es_nocturno:
+                empleados_habilitados = [item for item in empleados if item["nombre"] not in bloqueos_noche + bloqueos_puesto]
+            else:
+                empleados_habilitados = [item for item in empleados if item["nombre"] not in bloqueos_dia + bloqueos_puesto]
+            nuevo_puesto["empleados_disponibles"] = empleados_habilitados
+            puestos_con_disponibilidad.append(nuevo_puesto)
+
+        # Se busca la combinacion mas eficiente usando grafos
+        G = nx.Graph()
+        objetos_grafo = {}
+
+        for puesto in puestos_con_disponibilidad:
+            objetos_grafo[puesto["nombre"]] = [e["nombre"] for e in puesto["empleados_disponibles"]]
+        puestos_grafo = list(objetos_grafo.keys())
+
+        for puesto in puestos_grafo:
+            G.add_node(puesto, bipartite=0)
+
+        for personas in objetos_grafo.values():
+            for persona in personas:
+                G.add_node(persona, bipartite=1)
         
-        # Procesar matching completo
-        asignaciones_completas = {}
-        for u, v in matching_global:
-            if isinstance(u, tuple):
-                asignaciones_completas[u] = v
-            elif isinstance(v, tuple):
-                asignaciones_completas[v] = u
+        for puesto, personas in objetos_grafo.items():
+            print('\n   '+puesto)
+            # Obtener la lista de empleados disponibles para este puesto
+            puesto_info = next((p for p in puestos_con_disponibilidad if p['nombre'] == puesto), None)
+            empleados_disponibles_puesto = puesto_info['empleados_disponibles'] if puesto_info else []
+            
+            for persona in personas:
+                empleado_info = next((empleado for empleado in empleados if empleado['nombre'] == persona), None)
+                puesto_info_peso = next((p for p in PUESTOS if p['nombre'] == puesto), None)
+                
+                peso = calcular_peso_persona(
+                    empleado_info,
+                    puesto_info_peso,
+                    len(cronograma),
+                    todos_empleados=empleados,  # Pasar todos los empleados para balanceo
+                    empleados_disponibles_puesto=empleados_disponibles_puesto,  # Pasar empleados disponibles para este puesto
+                    cronograma=cronograma,  # Pasar cronograma para verificar descansos
+                    dia_idx=i,  # Pasar índice del día actual
+                    PUESTOS=PUESTOS,
+                )
+                empleadofull = next((empleado for empleado in empleados if empleado['nombre'] == persona), None)
+                print(f'      {persona}: {str(peso)}, {empleadofull["descansos"]}, {empleadofull["dias_sin_descanso"]}, {empleadofull["turnos_dia"]}, {empleadofull["turnos_noche"]}')
+                G.add_edge(
+                    puesto, 
+                    persona, 
+                    weight=peso
+                )
+
+        matching = nx.algorithms.matching.max_weight_matching(G, maxcardinality=True)
+
+        resultado = {}
+
+        for u, v in matching:
+            if u in puestos_grafo:
+                resultado[u] = v
+            else:
+                resultado[v] = u
+
+        # Asignar puestos
+        for puesto in puestos_con_disponibilidad:
+            es_nocturno = puesto["nocturno"]
+            empleado_a_asignar = next((empleado for empleado in empleados if empleado['nombre'] == resultado.get(puesto['nombre'])), None)
+            # Solo si hay trabajador disponible
+            if empleado_a_asignar:
+                # Actualiza la cuenta de jornadas
+                empleados = actualizar_empleados(empleados, empleado_a_asignar["nombre"], es_nocturno)
+                #Actualiza el calendario final
+                dia[puesto["nombre"]] = empleado_a_asignar["nombre"]
+        cronograma[i] = dia
+    
+    # POST-PROCESAMIENTO: Corregir desbalances extremos (empleados con 0 turnos de un tipo)
+    # Buscar empleados con 0 turnos de un tipo y oportunidades de intercambio
+    empleados_con_0_diurnos = [e for e in empleados if e['turnos_dia'] == 0 and e['turnos_noche'] > 0]
+    empleados_con_0_nocturnos = [e for e in empleados if e['turnos_noche'] == 0 and e['turnos_dia'] > 0]
+    
+    # Para cada empleado con 0 diurnos, buscar oportunidades de intercambio
+    for empleado_0_diurnos in empleados_con_0_diurnos:
+        nombre_0_diurnos = empleado_0_diurnos['nombre']
         
-        
-        # ========== PROCESAR ASIGNACIONES DÍA POR DÍA ==========
+        # Buscar en el cronograma días donde este empleado trabajó nocturno
+        # y hay otros empleados con muchos diurnos que podrían intercambiar
         for i in range(len(cronograma)):
             dia = cronograma[i]
             
-            # Bloqueos dinámicos para este día
-            bloqueos_dia = bloqueos_por_dia[i]['bloqueos_dia'].copy()
-            bloqueos_noche = bloqueos_por_dia[i]['bloqueos_noche'].copy()
-            
-            if i > 0:
-                dia_anterior = cronograma[i - 1]
-                puestos_nocturnos = [item for item in PUESTOS if item["nocturno"]]
-                for p in puestos_nocturnos:
-                    empleado_noche_anterior = dia_anterior[p["nombre"]]
-                    if empleado_noche_anterior:
-                        bloqueos_dia.append(empleado_noche_anterior)
-            
-            # Procesar asignaciones del matching para este día
+            # Buscar si este empleado trabajó en un puesto nocturno este día
+            puesto_nocturno_empleado = None
             for puesto in PUESTOS:
-                nodo_puesto_dia = (puesto['nombre'], i)
-                empleado_asignado = asignaciones_completas.get(nodo_puesto_dia)
-                es_nocturno = puesto["nocturno"]
-                
-                asignado_exitosamente = False
-                
-                if empleado_asignado:
-                    # Verificar restricciones finales (especialmente noche->día)
-                    bloqueos_puesto = [e['nombre'] for e in empleados if puesto['nombre'] not in e['puestos_habilitados']]
-                    
-                    bloqueado = False
-                    if es_nocturno:
-                        if empleado_asignado in bloqueos_noche + bloqueos_puesto:
-                            bloqueado = True
-                    else:
-                        if empleado_asignado in bloqueos_dia + bloqueos_puesto:
-                            bloqueado = True
-                    
-                    # Verificar restricción noche->día
-                    if not bloqueado and not es_nocturno and i > 0:
-                        dia_anterior = cronograma[i - 1]
-                        puestos_nocturnos = [item for item in PUESTOS if item["nocturno"]]
-                        for p in puestos_nocturnos:
-                            if dia_anterior[p["nombre"]] == empleado_asignado:
-                                bloqueado = True
+                if puesto['nocturno'] and dia.get(puesto['nombre']) == nombre_0_diurnos:
+                    puesto_nocturno_empleado = puesto['nombre']
+                    break
+            
+            if puesto_nocturno_empleado:
+                # Buscar empleados con muchos diurnos que trabajaron diurno este día
+                for otro_empleado in empleados:
+                    if otro_empleado['turnos_dia'] >= 3 and otro_empleado['turnos_noche'] == 0:
+                        nombre_otro = otro_empleado['nombre']
+                        
+                        # Buscar si este otro empleado trabajó en un puesto diurno este día
+                        puesto_diurno_otro = None
+                        for puesto in PUESTOS:
+                            if not puesto['nocturno'] and dia.get(puesto['nombre']) == nombre_otro:
+                                puesto_diurno_otro = puesto['nombre']
                                 break
-                    
-                    if not bloqueado:
-                        empleado_obj = next((e for e in empleados if e['nombre'] == empleado_asignado), None)
-                        if empleado_obj:
-                            empleados = actualizar_empleados(empleados, empleado_asignado, es_nocturno)
-                            dia[puesto["nombre"]] = empleado_asignado
-                            asignado_exitosamente = True
-                
-                # Fallback si no se asignó
-                if not asignado_exitosamente:
-                    bloqueos_puesto = [e['nombre'] for e in empleados if puesto['nombre'] not in e['puestos_habilitados']]
-                    
-                    empleados_disponibles = []
-                    if es_nocturno:
-                        empleados_disponibles = [item for item in empleados 
-                                               if item["nombre"] not in bloqueos_noche + bloqueos_puesto]
-                    else:
-                        empleados_disponibles = [item for item in empleados 
-                                               if item["nombre"] not in bloqueos_dia + bloqueos_puesto]
-                    
-                    empleados_validos = []
-                    for emp in empleados_disponibles:
-                        if not es_nocturno and i > 0:
-                            dia_anterior = cronograma[i - 1]
-                            puestos_nocturnos = [item for item in PUESTOS if item["nocturno"]]
-                            trabajo_noche_anterior = False
-                            for p in puestos_nocturnos:
-                                if dia_anterior[p["nombre"]] == emp["nombre"]:
-                                    trabajo_noche_anterior = True
-                                    break
-                            if not trabajo_noche_anterior:
-                                empleados_validos.append(emp)
-                        else:
-                            empleados_validos.append(emp)
-                    
-                    if empleados_validos:
-                        for emp in empleados_validos:
-                            emp['diferencia_promedio'] = promedio_turnos - (emp['turnos_dia'] + emp['turnos_noche'])
                         
-                        # Recalcular promedio y desviación para fallback
-                        total_descansos_fallback = sum(emp['descansos'] for emp in empleados)
-                        promedio_descansos_fallback = total_descansos_fallback / len(empleados) if len(empleados) > 0 else 0
-                        if len(empleados) > 0:
-                            varianza_descansos_fallback = sum((emp['descansos'] - promedio_descansos_fallback) ** 2 for emp in empleados) / len(empleados)
-                            desviacion_descansos_fallback = varianza_descansos_fallback ** 0.5
-                        else:
-                            desviacion_descansos_fallback = 0
-                        
-                        empleados_validos.sort(key=lambda e: (
-                            -e['diferencia_promedio'],
-                            e['turnos_dia'] + e['turnos_noche'],
-                            e['dias_sin_descanso'],
-                            -calcular_peso_persona(e, puesto, len(cronograma), promedio_turnos, 
-                                                   desequilibrios_previos, promedio_descansos_fallback, desviacion_descansos_fallback)
-                        ))
-                        empleado_fallback = empleados_validos[0]
-                        empleados = actualizar_empleados(empleados, empleado_fallback["nombre"], es_nocturno)
-                        dia[puesto["nombre"]] = empleado_fallback["nombre"]
-            
-            cronograma[i] = dia
-            
-            if i > 0:
-                # Obtener día siguiente si existe
-                dia_siguiente = cronograma[i + 1] if i + 1 < len(cronograma) else None
-                empleados = actualizar_descansos(empleados, dia, cronograma[i - 1], dia_siguiente, PUESTOS)
-        
-        # Al final de cada iteración, evaluar equidad y guardar mejor solución
-        total_turnos_final = sum(e['turnos_dia'] + e['turnos_noche'] for e in empleados)
-        promedio_final = total_turnos_final / len(empleados) if len(empleados) > 0 else 0
-        total_descansos_final = sum(e['descansos'] for e in empleados)
-        promedio_descansos_final = total_descansos_final / len(empleados) if len(empleados) > 0 else 0
-        
-        # Calcular score de equidad (menor es mejor)
-        # Incluir: varianza de turnos, varianza de descansos, promedio de descansos, y desviación de descansos
-        varianza_turnos = sum((e['turnos_dia'] + e['turnos_noche'] - promedio_final) ** 2 for e in empleados) / len(empleados) if len(empleados) > 0 else 0
-        varianza_descansos = sum((e['descansos'] - promedio_descansos_final) ** 2 for e in empleados) / len(empleados) if len(empleados) > 0 else 0
-        desviacion_descansos_final = varianza_descansos ** 0.5
-        
-        # Penalizar si hay empleados sin descansos
-        empleados_sin_descansos = sum(1 for e in empleados if e['descansos'] == 0 and (e['turnos_dia'] + e['turnos_noche']) > 0)
-        penalizacion_sin_descansos = empleados_sin_descansos * 1000  # Penalización alta por cada empleado sin descansos
-        
-        # Score: minimizar varianza, promedio de descansos, y desviación
-        # PRIORIDAD ALTA: Equidad en descansos - dar más peso a varianza y desviación de descansos
-        # Peso relativo: varianza de descansos es MUY importante para equidad
-        equidad_score = (varianza_turnos + 
-                         varianza_descansos * 3.0 +  # Aumentado de 1.0 a 3.0 - PRIORIDAD ALTA
-                         promedio_descansos_final * 0.5 + 
-                         desviacion_descansos_final * 2.0 +  # Aumentado de 0.3 a 2.0 - PRIORIDAD ALTA
-                         penalizacion_sin_descansos)
-        
-        # Guardar mejor solución
-        if mejor_solucion is None or equidad_score < mejor_equidad_score:
-            mejor_solucion = {
-                'empleados': [{'nombre': e['nombre'], 'turnos_dia': e['turnos_dia'], 
-                              'turnos_noche': e['turnos_noche'], 'descansos': e['descansos'],
-                              'dias_sin_descanso': e['dias_sin_descanso']} for e in empleados],
-                'cronograma': [{**d} for d in cronograma]
-            }
-            mejor_equidad_score = equidad_score
-        
-        # Encontrar empleados con desequilibrios extremos para próxima iteración
-        desequilibrios = []
-        desequilibrios_previos = {}  # Reiniciar para nueva iteración
-        
-        for emp in empleados:
-            turnos_emp = emp['turnos_dia'] + emp['turnos_noche']
-            diferencia_turnos = promedio_final - turnos_emp  # Positivo = tiene menos turnos
-            diferencia_descansos = emp['descansos'] - promedio_descansos_final  # Positivo = tiene más descansos
-            
-            # Verificar desequilibrio en turnos
-            desequilibrio_turnos = abs(diferencia_turnos) > max(2, promedio_final * 0.25)
-            # Verificar desequilibrio en descansos - MÁS ESTRICTO para lograr equidad
-            # Cualquier diferencia mayor a 1 día o 20% del promedio se considera desequilibrio
-            umbral_descansos = max(1, promedio_descansos_final * 0.2)  # Más estricto: 1 día o 20% (antes era 2 días o 40%)
-            desequilibrio_descansos = abs(diferencia_descansos) > umbral_descansos
-            
-            if desequilibrio_turnos or desequilibrio_descansos:
-                desequilibrios.append({
-                    'empleado': emp,
-                    'diferencia_turnos': abs(diferencia_turnos),
-                    'diferencia_descansos': abs(diferencia_descansos),
-                    'turnos': turnos_emp,
-                    'descansos': emp['descansos']
-                })
+                        # Si encontramos un intercambio posible, verificar que sea válido
+                        if puesto_diurno_otro:
+                            # Verificar que ambos empleados estén habilitados para los puestos
+                            # Obtener puestos habilitados desde df_empleados
+                            try:
+                                puestos_habilitados_0_diurnos = df_empleados.loc[df_empleados['nombre'] == nombre_0_diurnos].iloc[0]['puestos_habilitados'].split(', ')
+                                puestos_habilitados_otro = df_empleados.loc[df_empleados['nombre'] == nombre_otro].iloc[0]['puestos_habilitados'].split(', ')
+                                
+                                if (puesto_diurno_otro in puestos_habilitados_0_diurnos and
+                                    puesto_nocturno_empleado in puestos_habilitados_otro):
+                                    
+                                    # Verificar que no haya bloqueos (descanso válido, días seguidos, etc.)
+                                    # Para simplificar, solo intercambiar si ambos tienen descanso válido
+                                    dia_anterior = cronograma[i - 1] if i > 0 else None
+                                    dia_siguiente = cronograma[i + 1] if i < len(cronograma) - 1 else None
+                                    
+                                    # Verificar descanso válido para el cambio
+                                    hay_descanso_0_diurnos = es_descanso_valido(nombre_0_diurnos, dia_anterior if dia_anterior else dia,
+                                                                               None, dia_siguiente, PUESTOS, trabajara_diurno_hoy=True)
+                                    hay_descanso_otro = es_descanso_valido(nombre_otro, dia_anterior if dia_anterior else dia,
+                                                                          None, dia_siguiente, PUESTOS, trabajara_diurno_hoy=False)
+                                    
+                                    if hay_descanso_0_diurnos and hay_descanso_otro:
+                                        # Realizar el intercambio
+                                        dia[puesto_diurno_otro] = nombre_0_diurnos
+                                        dia[puesto_nocturno_empleado] = nombre_otro
+                                        
+                                        # Actualizar contadores
+                                        empleado_0_diurnos['turnos_dia'] += 1
+                                        empleado_0_diurnos['turnos_noche'] -= 1
+                                        otro_empleado['turnos_dia'] -= 1
+                                        otro_empleado['turnos_noche'] += 1
+                                        
+                                        cronograma[i] = dia
+                                        # Salir del bucle interno después de un intercambio
+                                        break
+                            except (IndexError, KeyError):
+                                # Si no se encuentra el empleado en df_empleados, continuar
+                                pass
                 
-                # Guardar información para ajuste en próxima iteración
-                # Dar más peso a desequilibrios de descansos para equidad
-                factor_ajuste = max(abs(diferencia_turnos), abs(diferencia_descansos) * 1.5)  # Descansos tienen 1.5x más peso
-                desequilibrios_previos[emp['nombre']] = {
-                    'muchos_descansos': diferencia_descansos > 1,  # Más estricto: antes era > 2
-                    'pocos_descansos': diferencia_descansos < -1,  # Más estricto: antes era < -2
-                    'pocos_turnos': diferencia_turnos > 2,
-                    'muchos_turnos': diferencia_turnos < -2,
-                    'factor_ajuste': factor_ajuste,
-                    'diferencia_descansos_abs': abs(diferencia_descansos)  # Guardar diferencia absoluta para ajustes más precisos
-                }
-        
-        # Si hay desequilibrios significativos, continuar iterando
-        # PRIORIDAD: Ser más estricto con desequilibrios de descansos
-        if iteracion_equidad < max_iteraciones_equidad - 1:
-            # Casos extremos: más estricto para descansos (diferencia > 2 días)
-            casos_extremos_descansos = sum(1 for d in desequilibrios if d['diferencia_descansos'] > 2)
-            casos_extremos_turnos = sum(1 for d in desequilibrios if d['diferencia_turnos'] > 4)
-            casos_extremos = casos_extremos_descansos + casos_extremos_turnos
-            
-            # Continuar si hay muchos desequilibrios o casos extremos de descansos
-            # Ser más estricto: continuar si hay desequilibrios de descansos incluso si son pocos
-            desequilibrios_descansos = sum(1 for d in desequilibrios if abs(d['empleado']['descansos'] - promedio_descansos_final) > 1)
-            
-            if (len(desequilibrios) > len(empleados) * 0.15 or 
-                casos_extremos > 0 or 
-                desequilibrios_descansos > len(empleados) * 0.1):  # Continuar si >10% tiene desequilibrio de descansos
-                continue
-            else:
-                # Equidad aceptable, salir del bucle
-                break
+                # Si se hizo un intercambio, salir del bucle de días
+                if empleado_0_diurnos['turnos_dia'] > 0:
+                    break
     
-    # Usar la mejor solución encontrada
-    if mejor_solucion is not None:
-        # Restaurar mejor solución
-        for i, emp_sol in enumerate(mejor_solucion['empleados']):
-            emp_actual = next((e for e in empleados if e['nombre'] == emp_sol['nombre']), None)
-            if emp_actual:
-                emp_actual['turnos_dia'] = emp_sol['turnos_dia']
-                emp_actual['turnos_noche'] = emp_sol['turnos_noche']
-                emp_actual['descansos'] = emp_sol['descansos']
-                emp_actual['dias_sin_descanso'] = emp_sol['dias_sin_descanso']
+    # Similar para empleados con 0 nocturnos (intercambiar con empleados con muchos nocturnos)
+    for empleado_0_nocturnos in empleados_con_0_nocturnos:
+        nombre_0_nocturnos = empleado_0_nocturnos['nombre']
         
-        cronograma = mejor_solucion['cronograma']
-        
-        # Mostrar resumen de equidad en descansos
-        total_descansos_final = sum(e['descansos'] for e in empleados)
-        promedio_descansos_final = total_descansos_final / len(empleados) if len(empleados) > 0 else 0
-        varianza_descansos_final = sum((e['descansos'] - promedio_descansos_final) ** 2 for e in empleados) / len(empleados) if len(empleados) > 0 else 0
-        desviacion_descansos_final = varianza_descansos_final ** 0.5
-        min_descansos = min(e['descansos'] for e in empleados)
-        max_descansos = max(e['descansos'] for e in empleados)
-        rango_descansos = max_descansos - min_descansos
-        
+        # Buscar en el cronograma días donde este empleado trabajó diurno
+        for i in range(len(cronograma)):
+            dia = cronograma[i]
+            
+            # Buscar si este empleado trabajó en un puesto diurno este día
+            puesto_diurno_empleado = None
+            for puesto in PUESTOS:
+                if not puesto['nocturno'] and dia.get(puesto['nombre']) == nombre_0_nocturnos:
+                    puesto_diurno_empleado = puesto['nombre']
+                    break
+            
+            if puesto_diurno_empleado:
+                # Buscar empleados con muchos nocturnos que trabajaron nocturno este día
+                for otro_empleado in empleados:
+                    if otro_empleado['turnos_noche'] >= 3 and otro_empleado['turnos_dia'] == 0:
+                        nombre_otro = otro_empleado['nombre']
+                        
+                        # Buscar si este otro empleado trabajó en un puesto nocturno este día
+                        puesto_nocturno_otro = None
+                        for puesto in PUESTOS:
+                            if puesto['nocturno'] and dia.get(puesto['nombre']) == nombre_otro:
+                                puesto_nocturno_otro = puesto['nombre']
+                                break
+                        
+                        # Si encontramos un intercambio posible, verificar que sea válido
+                        if puesto_nocturno_otro:
+                            # Verificar que ambos empleados estén habilitados para los puestos
+                            # Obtener puestos habilitados desde df_empleados
+                            try:
+                                puestos_habilitados_0_nocturnos = df_empleados.loc[df_empleados['nombre'] == nombre_0_nocturnos].iloc[0]['puestos_habilitados'].split(', ')
+                                puestos_habilitados_otro = df_empleados.loc[df_empleados['nombre'] == nombre_otro].iloc[0]['puestos_habilitados'].split(', ')
+                                
+                                if (puesto_nocturno_otro in puestos_habilitados_0_nocturnos and
+                                    puesto_diurno_empleado in puestos_habilitados_otro):
+                                    
+                                    # Verificar descanso válido para el cambio
+                                    dia_anterior = cronograma[i - 1] if i > 0 else None
+                                    dia_siguiente = cronograma[i + 1] if i < len(cronograma) - 1 else None
+                                    
+                                    hay_descanso_0_nocturnos = es_descanso_valido(nombre_0_nocturnos, dia_anterior if dia_anterior else dia,
+                                                                                  None, dia_siguiente, PUESTOS, trabajara_diurno_hoy=False)
+                                    hay_descanso_otro = es_descanso_valido(nombre_otro, dia_anterior if dia_anterior else dia,
+                                                                          None, dia_siguiente, PUESTOS, trabajara_diurno_hoy=True)
+                                    
+                                    if hay_descanso_0_nocturnos and hay_descanso_otro:
+                                        # Realizar el intercambio
+                                        dia[puesto_nocturno_otro] = nombre_0_nocturnos
+                                        dia[puesto_diurno_empleado] = nombre_otro
+                                        
+                                        # Actualizar contadores
+                                        empleado_0_nocturnos['turnos_noche'] += 1
+                                        empleado_0_nocturnos['turnos_dia'] -= 1
+                                        otro_empleado['turnos_noche'] -= 1
+                                        otro_empleado['turnos_dia'] += 1
+                                        
+                                        cronograma[i] = dia
+                                        # Salir del bucle interno después de un intercambio
+                                        break
+                            except (IndexError, KeyError):
+                                # Si no se encuentra el empleado en df_empleados, continuar
+                                pass
+                
+                # Si se hizo un intercambio, salir del bucle de días
+                if empleado_0_nocturnos['turnos_noche'] > 0:
+                    break
+    
+    # Actualizar los días de descanso después de completar todo el cronograma
+    # (necesitamos el día siguiente para la nueva condición)
+    for i in range(len(cronograma)):
+        dia = cronograma[i]
+        dia_anterior = cronograma[i - 1] if i > 0 else None
+        dia_siguiente = cronograma[i + 1] if i < len(cronograma) - 1 else None
+        empleados = actualizar_descansos(empleados, dia, dia_anterior, dia_siguiente, PUESTOS)
 
-    #Generar excel
-    data_excel = {
+    # Verificar si se está ejecutando desde optimize_pesos.py para no generar Excel
+    # (optimize_pesos.py ejecuta el código compilado con nombre 'turnos.py(inmem)')
+    import inspect
+    generar_excel = True
+    try:
+        frame = inspect.currentframe()
+        if frame and frame.f_back:
+            filename = str(frame.f_back.f_globals.get('__file__', ''))
+            if 'turnos.py(inmem)' in filename:
+                # Se está ejecutando desde optimize_pesos.py, no generar Excel
+                generar_excel = False
+    except:
+        pass
+    
+    if generar_excel:
+        #Generar excel
+        data_excel = {
         'Puestos': [puesto['nombre'] for puesto in PUESTOS],
         'Nocturno': [puesto['nocturno'] for puesto in PUESTOS],
     }
