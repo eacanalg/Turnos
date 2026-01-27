@@ -90,14 +90,23 @@ def actualizar_descansos (empleados, dia, dia_anterior, dia_siguiente, PUESTOS):
         
         if no_trabaja_hoy:
             # Condición 1: no trabajar hoy Y no trabajar la noche anterior
-            nocturno_anterior_libre = nombre_empleado not in empleados_nocturno_anterior
-            condicion1 = nocturno_anterior_libre  # Si no hay día anterior, se considera libre (True)
+            # IMPORTANTE: Solo aplicar si hay día anterior (no es el primer día)
+            condicion1 = False
+            if dia_anterior:
+                nocturno_anterior_libre = nombre_empleado not in empleados_nocturno_anterior
+                condicion1 = nocturno_anterior_libre
+            # Si no hay día anterior (primer día), condicion1 = False (no se aplica)
             
             # Condición 2: no trabajar hoy Y no trabajar el día siguiente (diurno)
-            diurno_siguiente_libre = nombre_empleado not in empleados_diurno_siguiente
-            condicion2 = diurno_siguiente_libre  # Si no hay día siguiente, se considera libre (True)
+            # IMPORTANTE: Solo aplicar si hay día siguiente (no es el último día)
+            condicion2 = False
+            if dia_siguiente:
+                diurno_siguiente_libre = nombre_empleado not in empleados_diurno_siguiente
+                condicion2 = diurno_siguiente_libre
+            # Si no hay día siguiente (último día), condicion2 = False (no se aplica)
             
-            # Es día libre si cumple AL MENOS UNA de las dos condiciones (OR)
+            # Es día libre si cumple AL MENOS UNA de las dos condiciones aplicables (OR)
+            # Si ninguna condición es aplicable (primer y último día en cronograma de 1 día), NO es descanso
             es_dia_libre = condicion1 or condicion2
             
             if es_dia_libre:
@@ -140,27 +149,33 @@ def es_descanso_valido(empleado_nombre, dia_intermedio, dia_anterior_intermedio,
         return False
     
     # Condición 1: no trabajar ese día Y no trabajar la noche anterior
-    nocturno_anterior_libre = True
+    # IMPORTANTE: Solo aplicar si hay día anterior (no es el primer día)
+    condicion1 = False
     if dia_anterior_intermedio:
+        nocturno_anterior_libre = True
         for puesto in puestos_nocturnos:
             if dia_anterior_intermedio.get(puesto["nombre"]) == empleado_nombre:
                 nocturno_anterior_libre = False
                 break
-    condicion1 = nocturno_anterior_libre
+        condicion1 = nocturno_anterior_libre
+    # Si no hay día anterior (primer día), condicion1 = False (no se aplica)
     
     # Condición 2: no trabajar ese día Y no trabajar el día siguiente (diurno)
+    # IMPORTANTE: Solo aplicar si hay día siguiente o se especifica explícitamente
+    condicion2 = False
     if trabajara_diurno_hoy is not None:
         # Si se especifica explícitamente si trabajará diurno hoy, usar esa información
         diurno_siguiente_libre = not trabajara_diurno_hoy
-    else:
+        condicion2 = diurno_siguiente_libre
+    elif dia_siguiente_intermedio:
         # Verificar en el cronograma del día siguiente
         diurno_siguiente_libre = True
-        if dia_siguiente_intermedio:
-            for puesto in puestos_diurnos:
-                if dia_siguiente_intermedio.get(puesto["nombre"]) == empleado_nombre:
-                    diurno_siguiente_libre = False
-                    break
-    condicion2 = diurno_siguiente_libre
+        for puesto in puestos_diurnos:
+            if dia_siguiente_intermedio.get(puesto["nombre"]) == empleado_nombre:
+                diurno_siguiente_libre = False
+                break
+        condicion2 = diurno_siguiente_libre
+    # Si no hay día siguiente y no se especifica, condicion2 = False (no se aplica)
     
     # Es descanso válido si cumple AL MENOS UNA de las dos condiciones
     return condicion1 or condicion2
@@ -257,13 +272,17 @@ def calcular_peso_persona (
     turnos_noche = empleado['turnos_noche']
     
     # CASO CRÍTICO: Si tiene 0 turnos de un tipo, penalización EXTREMADAMENTE ALTA para el tipo que ya tiene
-    # Esto debe ser tan alto que prácticamente bloquee la asignación a menos que no haya otra opción
+    # Esto debe ser tan alto que se prefiera dejar el turno vacío antes que asignarlo
+    # La penalización debe crecer con el número de turnos del tipo opuesto que ya tiene
     if turnos_dia == 0 and nocturno:
         # Tiene 0 diurnos y se le está ofreciendo otro nocturno - PENALIZACIÓN EXTREMADAMENTE ALTA
-        variable_jornadas = -500  # Aumentado de -100 a -500
+        # Penalización base muy alta + penalización adicional por cada turno nocturno que ya tiene
+        # Esto hace que sea preferible dejar el turno vacío si ya tiene varios turnos nocturnos
+        variable_jornadas = -5000 - (turnos_noche * 1000)  # Base -5000, -1000 por cada turno nocturno adicional
     elif turnos_noche == 0 and not nocturno:
         # Tiene 0 nocturnos y se le está ofreciendo otro diurno - PENALIZACIÓN EXTREMADAMENTE ALTA
-        variable_jornadas = -500  # Aumentado de -100 a -500
+        # Penalización base muy alta + penalización adicional por cada turno diurno que ya tiene
+        variable_jornadas = -5000 - (turnos_dia * 1000)  # Base -5000, -1000 por cada turno diurno adicional
     elif turnos_dia == 0 and not nocturno:
         # Tiene 0 diurnos y se le ofrece un diurno - INCENTIVO MUY ALTO
         # Si hay múltiples empleados con 0 diurnos, normalizar pesos para distribución equitativa
@@ -301,38 +320,42 @@ def calcular_peso_persona (
         if nocturno:
             diferencia = turnos_noche - turnos_dia
             if diferencia > 0:
-                # Penalización base más agresiva: multiplicar por 100 (aumentado de 20)
-                variable_jornadas = -diferencia * 100
-                # Penalización escalonada que crece rápidamente
-                if diferencia > 1:
-                    variable_jornadas = -diferencia * 200  # Diferencia de 2 o más
-                if diferencia > 2:
-                    variable_jornadas = -diferencia * 400  # Diferencia de 3 o más
-                if diferencia > 3:
-                    variable_jornadas = -diferencia * 800  # Diferencia de 4 o más
-                if diferencia > 4:
-                    variable_jornadas = -diferencia * 1500  # Diferencia de 5 o más
+                # Si la diferencia es muy grande (más de 5), penalización EXTREMA similar al caso de 0 turnos
                 if diferencia > 5:
-                    variable_jornadas = -diferencia * 3000  # Diferencia de 6 o más
+                    variable_jornadas = -3000 - (diferencia * 500)  # Penalización extrema para diferencias muy grandes
+                else:
+                    # Penalización base más agresiva: multiplicar por 100 (aumentado de 20)
+                    variable_jornadas = -diferencia * 100
+                    # Penalización escalonada que crece rápidamente
+                    if diferencia > 1:
+                        variable_jornadas = -diferencia * 200  # Diferencia de 2 o más
+                    if diferencia > 2:
+                        variable_jornadas = -diferencia * 400  # Diferencia de 3 o más
+                    if diferencia > 3:
+                        variable_jornadas = -diferencia * 800  # Diferencia de 4 o más
+                    if diferencia > 4:
+                        variable_jornadas = -diferencia * 1500  # Diferencia de 5 o más
             else:
                 # Si tiene más diurnos que nocturnos, incentivar para balancear
                 variable_jornadas = abs(diferencia) * 100  # Aumentado de 20 a 100
         else:
             diferencia = turnos_dia - turnos_noche
             if diferencia > 0:
-                # Penalización base más agresiva: multiplicar por 100 (aumentado de 20)
-                variable_jornadas = -diferencia * 100
-                # Penalización escalonada que crece rápidamente
-                if diferencia > 1:
-                    variable_jornadas = -diferencia * 200  # Diferencia de 2 o más
-                if diferencia > 2:
-                    variable_jornadas = -diferencia * 400  # Diferencia de 3 o más
-                if diferencia > 3:
-                    variable_jornadas = -diferencia * 800  # Diferencia de 4 o más
-                if diferencia > 4:
-                    variable_jornadas = -diferencia * 1500  # Diferencia de 5 o más
+                # Si la diferencia es muy grande (más de 5), penalización EXTREMA similar al caso de 0 turnos
                 if diferencia > 5:
-                    variable_jornadas = -diferencia * 3000  # Diferencia de 6 o más
+                    variable_jornadas = -3000 - (diferencia * 500)  # Penalización extrema para diferencias muy grandes
+                else:
+                    # Penalización base más agresiva: multiplicar por 100 (aumentado de 20)
+                    variable_jornadas = -diferencia * 100
+                    # Penalización escalonada que crece rápidamente
+                    if diferencia > 1:
+                        variable_jornadas = -diferencia * 200  # Diferencia de 2 o más
+                    if diferencia > 2:
+                        variable_jornadas = -diferencia * 400  # Diferencia de 3 o más
+                    if diferencia > 3:
+                        variable_jornadas = -diferencia * 800  # Diferencia de 4 o más
+                    if diferencia > 4:
+                        variable_jornadas = -diferencia * 1500  # Diferencia de 5 o más
             else:
                 # Si tiene más nocturnos que diurnos, incentivar para balancear
                 variable_jornadas = abs(diferencia) * 100  # Aumentado de 20 a 100
@@ -906,69 +929,210 @@ if __name__ == "__main__":
         # Fórmula para calcular descansos según la nueva lógica:
         # Un día es descanso si: ese día no hay turnos asignados Y el día anterior no se trabajó nocturno
         # O si: ese día no se trabajó Y al día siguiente no se trabaja diurno
+        # OPTIMIZACIÓN: Dividir en bloques para evitar fórmulas muy largas que excedan el límite de Excel
         for index, empleado in enumerate(empleados):
             nombre_emp = empleado["nombre"]
             num_dias = len(cronograma)
+            # Usar referencia específica para cada fila
+            # Cada fórmula se escribe en D{index+2}, y necesita referirse a A{index+2}
+            fila_actual = index + 2
+            nombre_emp_excel = f'$A{fila_actual}'  # Columna A absoluta, fila específica
             
-            # Construir fórmula día por día usando SUM
-            partes_formula = []
-            for dia_idx in range(num_dias):
-                # Verificar si el empleado NO trabajó ese día
-                # Buscar directamente en Cronograma si el empleado está asignado a algún puesto ese día
-                nombre_emp_excel = f'A{index+2}'  # Columna A tiene el nombre del empleado
-                col_dia_cronograma = get_excel_column_name(3 + dia_idx)  # Columna del día en hoja Cronograma
+            # Dividir en bloques de máximo 15 días para evitar fórmulas muy largas
+            # Con 31 días, bloques de 30 generan fórmulas de ~11000 caracteres (muy largas)
+            tamano_bloque = 15
+            bloques_formula = []
+            
+            for bloque_inicio in range(0, num_dias, tamano_bloque):
+                bloque_fin = min(bloque_inicio + tamano_bloque, num_dias)
+                partes_bloque = []
                 
-                # Verificar si el empleado trabajó ese día (buscar su nombre en la columna del día en Cronograma)
-                dia_vacio = f'ISERROR(MATCH({nombre_emp_excel}, Cronograma!{col_dia_cronograma}$2:{col_dia_cronograma}${len(PUESTOS) + 1}, 0))'
-                
-                condiciones_descanso = []
-                
-                # Condición 1: Día vacío Y día anterior no trabajó nocturno
-                # NO aplicar al primer día (dia_idx > 0)
-                if dia_idx > 0:
-                    # Verificar si día anterior trabajó nocturno
-                    # Buscar si el empleado está en algún puesto nocturno el día anterior en Cronograma
-                    col_anterior_cronograma = get_excel_column_name(3 + dia_idx - 1)
-                    # Usar SUMPRODUCT para verificar si el empleado trabajó en un puesto nocturno el día anterior
-                    # Buscar el empleado en la columna del día anterior, y si lo encuentra, verificar si ese puesto es nocturno
-                    trabajo_ayer_nocturno = f'IF(ISERROR(MATCH({nombre_emp_excel},Cronograma!{col_anterior_cronograma}$2:{col_anterior_cronograma}${len(PUESTOS) + 1},0)),FALSE,INDEX(Cronograma!$B$2:$B${len(PUESTOS) + 1},MATCH({nombre_emp_excel},Cronograma!{col_anterior_cronograma}$2:{col_anterior_cronograma}${len(PUESTOS) + 1},0))=TRUE)'
-                    cond1 = f'AND({dia_vacio}, NOT({trabajo_ayer_nocturno}))'
-                    condiciones_descanso.append(cond1)
-                
-                # Condición 2: Día vacío Y día siguiente no trabaja diurno
-                # NO aplicar al último día (dia_idx < num_dias - 1)
-                if dia_idx < num_dias - 1:
-                    # Verificar si día siguiente trabaja diurno
-                    # Buscar si el empleado está en algún puesto diurno el día siguiente en Cronograma
-                    col_siguiente_cronograma = get_excel_column_name(3 + dia_idx + 1)
-                    # Usar SUMPRODUCT para verificar si el empleado trabajará en un puesto diurno el día siguiente
-                    trabajo_manana_diurno = f'IF(ISERROR(MATCH({nombre_emp_excel},Cronograma!{col_siguiente_cronograma}$2:{col_siguiente_cronograma}${len(PUESTOS) + 1},0)),FALSE,INDEX(Cronograma!$B$2:$B${len(PUESTOS) + 1},MATCH({nombre_emp_excel},Cronograma!{col_siguiente_cronograma}$2:{col_siguiente_cronograma}${len(PUESTOS) + 1},0))=FALSE)'
-                    cond2 = f'AND({dia_vacio}, NOT({trabajo_manana_diurno}))'
-                    condiciones_descanso.append(cond2)
-                
-                # Si cumple cualquiera de las condiciones aplicables, es descanso
-                # Un día es descanso si cumple AL MENOS UNA de las dos condiciones
-                if condiciones_descanso:
-                    if len(condiciones_descanso) == 1:
-                        # Solo una condición aplicable
-                        partes_formula.append(f'IF({condiciones_descanso[0]}, 1, 0)')
+                for dia_idx in range(bloque_inicio, bloque_fin):
+                    col_dia_cronograma = get_excel_column_name(3 + dia_idx)
+                    # Versión más compacta: usar SUMPRODUCT para verificar si NO trabaja ese día
+                    dia_vacio = f'SUMPRODUCT((Cronograma!{col_dia_cronograma}$2:{col_dia_cronograma}${len(PUESTOS) + 1}={nombre_emp_excel})*1)=0'
+                    
+                    condiciones_descanso = []
+                    
+                    # Construir condiciones de forma más compacta
+                    if dia_idx > 0:
+                        col_anterior = get_excel_column_name(3 + dia_idx - 1)
+                        # Verificar si trabajó nocturno ayer
+                        trabajo_ayer_nocturno = f'SUMPRODUCT((Cronograma!{col_anterior}$2:{col_anterior}${len(PUESTOS) + 1}={nombre_emp_excel})*(Cronograma!$B$2:$B${len(PUESTOS) + 1}=TRUE))>0'
+                        cond1 = f'({dia_vacio})*NOT({trabajo_ayer_nocturno})'
+                        condiciones_descanso.append(cond1)
+                    
+                    if dia_idx < num_dias - 1:
+                        col_siguiente = get_excel_column_name(3 + dia_idx + 1)
+                        # Verificar si trabajará diurno mañana
+                        trabajo_manana_diurno = f'SUMPRODUCT((Cronograma!{col_siguiente}$2:{col_siguiente}${len(PUESTOS) + 1}={nombre_emp_excel})*(Cronograma!$B$2:$B${len(PUESTOS) + 1}=FALSE))>0'
+                        cond2 = f'({dia_vacio})*NOT({trabajo_manana_diurno})'
+                        condiciones_descanso.append(cond2)
+                    
+                    # IMPORTANTE: Un día es descanso solo si cumple AL MENOS UNA de las condiciones aplicables
+                    if condiciones_descanso:
+                        if len(condiciones_descanso) == 1:
+                            # Solo una condición: debe cumplirse (1 si TRUE, 0 si FALSE)
+                            partes_bloque.append(f'({condiciones_descanso[0]})')
+                        else:
+                            # Dos condiciones: debe cumplirse AL MENOS UNA (OR)
+                            partes_bloque.append(f'(({condiciones_descanso[0]})+({condiciones_descanso[1]})>0)')
                     else:
-                        # Dos condiciones aplicables: usar OR
-                        partes_formula.append(f'IF(OR({",".join(condiciones_descanso)}), 1, 0)')
+                        # No hay condiciones aplicables: NO es descanso
+                        partes_bloque.append('0')
+                
+                if partes_bloque:
+                    bloques_formula.append(f'SUM({",".join(partes_bloque)})')
+            
+            # Combinar todos los bloques
+            if len(bloques_formula) == 0:
+                # Si no hay bloques (caso muy raro), usar fórmula por defecto
+                formula_final = '=0'
+                if index == 0:
+                    print(f"DEBUG - No hay bloques para {empleado['nombre']}, usando =0")
+            elif len(bloques_formula) == 1:
+                formula_final = f'={bloques_formula[0]}'
+            else:
+                formula_final = f'=SUM({",".join(bloques_formula)})'
+            
+            # Debug: imprimir información sobre la fórmula inicial
+            if index == 0:
+                print(f"DEBUG - Empleado: {empleado['nombre']}, Fila: {fila_actual}")
+                print(f"DEBUG - Bloques: {len(bloques_formula)}, Tamaño fórmula inicial: {len(formula_final)}")
+                if len(formula_final) < 500:
+                    print(f"DEBUG - Fórmula inicial completa: {formula_final}")
                 else:
-                    # Si no hay condiciones aplicables (solo pasa si hay 1 día), no es descanso
-                    partes_formula.append('0')
+                    print(f"DEBUG - Fórmula inicial (primeros 300 chars): {formula_final[:300]}...")
             
-            # Sumar todos los días que son descanso
-            formula_final = f'''=SUM({",".join(partes_formula)})'''
+            # Escribir la fórmula - SIEMPRE usar fórmula, nunca valor de Python
+            # Si la fórmula es muy larga, dividir en más bloques
+            max_intentos = 3
+            tamano_bloque_actual = tamano_bloque
+            intento = 0
+            formula_exitosa = False
             
+            # Intentar escribir la fórmula inicial si es válida y no necesita reconstrucción
+            if formula_final and len(formula_final) > 0 and len(formula_final) < 8000:
+                try:
+                    worksheet.write_formula(f'D{fila_actual}', formula_final)
+                    formula_exitosa = True
+                    if index == 0:
+                        print(f"DEBUG - Fórmula inicial escrita exitosamente (sin reconstrucción)")
+                except Exception as e:
+                    if index == 0:
+                        print(f"DEBUG - Error al escribir fórmula inicial: {e}")
+                    # Continuar al bucle de intentos para reconstruir
             
-            # Escribir la fórmula
-            try:
-                worksheet.write_formula(f'D{index+2}', formula_final)
-            except Exception as e:
-                # Si falla, usar valor calculado en Python como respaldo
-                worksheet.write(f'D{index+2}', empleado['descansos'])
+            while intento < max_intentos and not formula_exitosa:
+                try:
+                    # Si la fórmula excede el límite o está vacía, reducir tamaño de bloque y reconstruir
+                    if not formula_final or len(formula_final) >= 8000:
+                        if index == 0:
+                            print(f"DEBUG - Intento {intento + 1}: Fórmula muy larga ({len(formula_final) if formula_final else 0} chars), reconstruyendo con bloque de {tamano_bloque_actual}")
+                        # Reducir tamaño de bloque progresivamente
+                        if intento == 0:
+                            tamano_bloque_actual = 10
+                        elif intento == 1:
+                            tamano_bloque_actual = 5
+                        else:
+                            tamano_bloque_actual = 3
+                        bloques_formula_nuevos = []
+                        
+                        for bloque_inicio in range(0, num_dias, tamano_bloque_actual):
+                            bloque_fin = min(bloque_inicio + tamano_bloque_actual, num_dias)
+                            partes_bloque = []
+                            
+                            for dia_idx in range(bloque_inicio, bloque_fin):
+                                col_dia_cronograma = get_excel_column_name(3 + dia_idx)
+                                # Versión más compacta: usar SUMPRODUCT para verificar si NO trabaja ese día
+                                dia_vacio = f'SUMPRODUCT((Cronograma!{col_dia_cronograma}$2:{col_dia_cronograma}${len(PUESTOS) + 1}=$A{fila_actual})*1)=0'
+                                
+                                condiciones_descanso = []
+                                
+                                # Condición 1: Solo aplicar si hay día anterior (dia_idx > 0)
+                                if dia_idx > 0:
+                                    col_anterior = get_excel_column_name(3 + dia_idx - 1)
+                                    trabajo_ayer_nocturno = f'SUMPRODUCT((Cronograma!{col_anterior}$2:{col_anterior}${len(PUESTOS) + 1}=$A{fila_actual})*(Cronograma!$B$2:$B${len(PUESTOS) + 1}=TRUE))>0'
+                                    cond1 = f'({dia_vacio})*NOT({trabajo_ayer_nocturno})'
+                                    condiciones_descanso.append(cond1)
+                                
+                                # Condición 2: Solo aplicar si hay día siguiente (dia_idx < num_dias - 1)
+                                if dia_idx < num_dias - 1:
+                                    col_siguiente = get_excel_column_name(3 + dia_idx + 1)
+                                    trabajo_manana_diurno = f'SUMPRODUCT((Cronograma!{col_siguiente}$2:{col_siguiente}${len(PUESTOS) + 1}=$A{fila_actual})*(Cronograma!$B$2:$B${len(PUESTOS) + 1}=FALSE))>0'
+                                    cond2 = f'({dia_vacio})*NOT({trabajo_manana_diurno})'
+                                    condiciones_descanso.append(cond2)
+                                
+                                if condiciones_descanso:
+                                    if len(condiciones_descanso) == 1:
+                                        partes_bloque.append(f'({condiciones_descanso[0]})')
+                                    else:
+                                        partes_bloque.append(f'(({condiciones_descanso[0]})+({condiciones_descanso[1]})>0)')
+                                else:
+                                    # No hay condiciones aplicables: NO es descanso
+                                    partes_bloque.append('0')
+                            
+                            if partes_bloque:
+                                bloques_formula_nuevos.append(f'SUM({",".join(partes_bloque)})')
+                        
+                        # Reconstruir formula_final
+                        if len(bloques_formula_nuevos) == 0:
+                            formula_final = '=0'
+                            if index == 0:
+                                print(f"DEBUG - No se generaron bloques nuevos, usando =0")
+                        elif len(bloques_formula_nuevos) == 1:
+                            formula_final = f'={bloques_formula_nuevos[0]}'
+                        else:
+                            formula_final = f'=SUM({",".join(bloques_formula_nuevos)})'
+                        
+                        if index == 0:
+                            print(f"DEBUG - Fórmula reconstruida: {len(bloques_formula_nuevos)} bloques, tamaño: {len(formula_final)} chars")
+                    
+                    # Verificar que formula_final no esté vacío antes de escribir
+                    if formula_final and len(formula_final) > 0 and len(formula_final) < 8192:  # Límite de Excel
+                        # Debug: imprimir primera fórmula para verificar
+                        if index == 0:
+                            print(f"DEBUG - Escribiendo fórmula para {empleado['nombre']} (fila {fila_actual}):")
+                            print(f"DEBUG - Longitud: {len(formula_final)}")
+                            print(f"DEBUG - Primeros 500 chars: {formula_final[:500]}")
+                        try:
+                            worksheet.write_formula(f'D{fila_actual}', formula_final)
+                            formula_exitosa = True
+                            if index == 0:
+                                print(f"DEBUG - Fórmula escrita exitosamente en D{fila_actual}")
+                        except Exception as e:
+                            if index == 0:
+                                print(f"DEBUG - Error al escribir fórmula: {e}")
+                            raise
+                    elif not formula_final or len(formula_final) == 0:
+                        # Si está vacío, usar fórmula por defecto
+                        formula_final = '=0'
+                        worksheet.write_formula(f'D{fila_actual}', formula_final)
+                        formula_exitosa = True
+                    else:
+                        # Si aún es muy larga, reducir más el bloque
+                        intento += 1
+                        tamano_bloque_actual = max(5, tamano_bloque_actual // 2)
+                        formula_final = ""  # Forzar reconstrucción en la siguiente iteración
+                        
+                except Exception as e:
+                    if index == 0:
+                        print(f"DEBUG - Excepción en intento {intento + 1}: {e}")
+                    intento += 1
+                    tamano_bloque_actual = max(5, tamano_bloque_actual // 2)
+                    formula_final = ""  # Forzar reconstrucción en la siguiente iteración
+            
+            # Si después de todos los intentos falla, usar fórmula mínima pero SIEMPRE fórmula
+            if not formula_exitosa:
+                if index == 0:
+                    print(f"DEBUG - No se pudo escribir fórmula después de {max_intentos} intentos, usando =0")
+                try:
+                    worksheet.write_formula(f'D{fila_actual}', '=0')
+                except:
+                    # Último recurso absoluto: fórmula que siempre retorna 0
+                    if index == 0:
+                        print(f"DEBUG - Error al escribir =0, usando =IF(TRUE,0,0)")
+                    worksheet.write_formula(f'D{fila_actual}', '=IF(TRUE,0,0)')
         
         # Formato condicional para colorear celdas según tipo de turno
         # Amarillo: turnos diurnos
