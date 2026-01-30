@@ -887,7 +887,7 @@ if __name__ == "__main__":
         'Nocturno': [puesto['nocturno'] for puesto in PUESTOS],
     }
     for dia in cronograma:
-        data_excel[dia['fecha']] = [dia[puesto["nombre"]] for puesto in PUESTOS]
+        data_excel[dia['fecha'].strftime("%d-%m-%Y")] = [dia[puesto["nombre"]] for puesto in PUESTOS]
     df = pd.DataFrame(data_excel)
     excel_file_path = f"Cronograma-{cronograma[0]['fecha']}-{cronograma[-1]['fecha']}.xlsx"
     with pd.ExcelWriter(excel_file_path, engine='xlsxwriter') as writer:
@@ -905,9 +905,9 @@ if __name__ == "__main__":
         })
 
         # Hoja 2
-        format_yellow = workbook.add_format({'bg_color': '#FFFF00'})
-        format_blue = workbook.add_format({'bg_color': '#0033CC'})
-        format_green = workbook.add_format({'bg_color': '#0DBF33'})
+        format_yellow = workbook.add_format({'bg_color': '#FFFF66'})
+        format_blue = workbook.add_format({'bg_color': '#83CCEB'})
+        format_green = workbook.add_format({'bg_color': '#B5E6A2'})
 
         cr_individual = {
             "Nombre": [empleado["nombre"] for empleado in empleados],
@@ -916,7 +916,7 @@ if __name__ == "__main__":
             "Descanso": [empleado["nombre"] for empleado in empleados],
         }
         for index, dia in enumerate(cronograma):
-            cr_individual[dia['fecha']] = [f'=_xlfn.XLOOKUP("{empleado["nombre"]}",Cronograma!{get_excel_column_name(index + 3)}2:{get_excel_column_name(index + 3)}{len(PUESTOS ) + 1},Cronograma!A2:A{len(PUESTOS ) + 1},"")' for empleado in empleados]
+            cr_individual[dia['fecha'].strftime("%d-%m-%Y")] = [f'=_xlfn.XLOOKUP("{empleado["nombre"]}",Cronograma!{get_excel_column_name(index + 3)}2:{get_excel_column_name(index + 3)}{len(PUESTOS ) + 1},Cronograma!A2:A{len(PUESTOS ) + 1},"")' for empleado in empleados]
         
         di = pd.DataFrame(cr_individual)
         di.to_excel(writer, sheet_name="Empleados", index=False)
