@@ -855,6 +855,7 @@ if __name__ == "__main__":
         df.to_excel(writer, sheet_name='Cronograma', index=False)
         worksheet = writer.sheets["Cronograma"]
         worksheet.autofit()
+        worksheet.protect(options={'format_columns': True, 'format_rows': True})
         format_red = workbook.add_format({'bg_color': '#FF0000'})
         worksheet.conditional_format(f'C2:{get_excel_column_name(len(cronograma) + 2)}{len(PUESTOS) + 1}', {
             'type':     'formula',
@@ -1141,4 +1142,4 @@ if __name__ == "__main__":
         })
         
         worksheet.autofit()
-        worksheet.protect(options={'format_columns': True, 'format_rows': True})
+        
