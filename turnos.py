@@ -561,42 +561,9 @@ if __name__ == "__main__":
                     filtrados.append(emp)
                 empleados_habilitados = filtrados
 
-            # Fallback: si no hay candidatos (por bloqueos estrictos), relajar bloqueo de cambio de jornada
-            # pero seguir respetando que no trabajen 5+ días seguidos.
+            # Fallback: si no hay candidatos válidos, NO asignar el puesto (reglas estrictas)
             if not empleados_habilitados:
-                candidatos = [item for item in empleados if puesto['nombre'] in item.get('puestos_habilitados', [])]
-                candidatos_filtrados = []
-                for empleado in candidatos:
-                    # calcular streak de días seguidos trabajados
-                    streak = 0
-                    for j in range(i - 1, -1, -1):
-                        dia_verificar = cronograma[j]
-                        trabajo = False
-                        for puesto_nombre in dia_verificar:
-                            if puesto_nombre != 'fecha' and dia_verificar[puesto_nombre] == empleado['nombre']:
-                                trabajo = True
-                                break
-                        if trabajo:
-                            streak += 1
-                        else:
-                            break
-                    # permitir si no ha trabajado 5 días seguidos
-                    if streak < 5:
-                        candidatos_filtrados.append(empleado)
-
-                # Aplicar también el hardcap sobre los candidatos relajados
-                if es_nocturno:
-                    candidatos_filtrados2 = []
-                    for emp in candidatos_filtrados:
-                        tn = emp.get('turnos_noche', 0)
-                        td = emp.get('turnos_dia', 0)
-                        if tn >= 10 and (tn / max(1, td)) >= 3.0:
-                            continue
-                        candidatos_filtrados2.append(emp)
-                    candidatos_filtrados = candidatos_filtrados2
-
-                # si al filtrar quedan candidatos, usarlos; si no, usar los candidatos originales (mejor tener alguien)
-                empleados_habilitados = candidatos_filtrados if candidatos_filtrados else candidatos
+                empleados_habilitados = []
 
             nuevo_puesto["empleados_disponibles"] = empleados_habilitados
             puestos_con_disponibilidad.append(nuevo_puesto)
