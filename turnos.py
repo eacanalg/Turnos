@@ -842,8 +842,9 @@ if __name__ == "__main__":
         'Puestos': [puesto['nombre'] for puesto in PUESTOS],
         'Nocturno': [puesto['nocturno'] for puesto in PUESTOS],
     }
-    for dia in cronograma:
-        data_excel[dia['fecha'].strftime("%d-%m-%Y")] = [dia[puesto["nombre"]] for puesto in PUESTOS]
+    for index, dia in enumerate(cronograma):
+        # data_excel[dia['fecha'].strftime("%d-%m-%Y")] = [dia[puesto["nombre"]] for puesto in PUESTOS]
+        data_excel[dia['fecha'].strftime("%d-%m-%Y")] = [f'=_xlfn.XLOOKUP($A{indexp+2},Empleados!{get_excel_column_name(index + 5)}2:{get_excel_column_name(index + 5)}{len(empleados ) + 1},Empleados!A2:A{len(empleados ) + 1},"")' for indexp, puesto in enumerate(PUESTOS)]
     df = pd.DataFrame(data_excel)
     # Use an updated filename to avoid permission conflicts with an open file
     excel_file_path = f"Cronograma-{cronograma[0]['fecha']}-{cronograma[-1]['fecha']}.xlsx"
@@ -873,7 +874,7 @@ if __name__ == "__main__":
             "Descanso": [empleado["nombre"] for empleado in empleados],
         }
         for index, dia in enumerate(cronograma):
-            cr_individual[dia['fecha'].strftime("%d-%m-%Y")] = [f'=_xlfn.XLOOKUP("{empleado["nombre"]}",Cronograma!{get_excel_column_name(index + 3)}2:{get_excel_column_name(index + 3)}{len(PUESTOS ) + 1},Cronograma!A2:A{len(PUESTOS ) + 1},"")' for empleado in empleados]
+            cr_individual[dia['fecha'].strftime("%d-%m-%Y")] = [ next((key for key, val in dia.items() if val == empleado['nombre']), None) for empleado in empleados]
         
         di = pd.DataFrame(cr_individual)
         di.to_excel(writer, sheet_name="Empleados", index=False)
