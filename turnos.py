@@ -84,44 +84,33 @@ def actualizar_descansos (empleados, dia, dia_anterior, dia_siguiente, PUESTOS):
     
     for empleado in empleados:
         nombre_empleado = empleado["nombre"]
-        
-        # Verificar si no trabaja el día actual
         no_trabaja_hoy = nombre_empleado not in empleados_dia_actual
-        
+        # Detect arrastre: si es el primer día y dias_sin_descanso >= 5
+        arrastre_bloqueado = False
+        if not dia_anterior and empleado.get('dias_sin_descanso', 0) >= 5:
+            arrastre_bloqueado = True
         if no_trabaja_hoy:
-            # Condición 1: no trabajar hoy Y no trabajar la noche anterior
-            # IMPORTANTE: Solo aplicar si hay día anterior (no es el primer día)
             condicion1 = False
             if dia_anterior:
                 nocturno_anterior_libre = nombre_empleado not in empleados_nocturno_anterior
                 condicion1 = nocturno_anterior_libre
-            # Si no hay día anterior (primer día), condicion1 = False (no se aplica)
-            
-            # Condición 2: no trabajar hoy Y no trabajar el día siguiente (diurno)
-            # IMPORTANTE: Solo aplicar si hay día siguiente (no es el último día)
             condicion2 = False
             if dia_siguiente:
                 diurno_siguiente_libre = nombre_empleado not in empleados_diurno_siguiente
                 condicion2 = diurno_siguiente_libre
-            # Si no hay día siguiente (último día), condicion2 = False (no se aplica)
-            
-            # Es día libre si cumple AL MENOS UNA de las dos condiciones aplicables (OR)
-            # Si ninguna condición es aplicable (primer y último día en cronograma de 1 día), NO es descanso
             es_dia_libre = condicion1 or condicion2
-            
-            if es_dia_libre:
+            # Resetear contador de días sin descanso SIEMPRE que el empleado descanse
+            if arrastre_bloqueado or es_dia_libre:
                 objeto_modificado = empleado.copy()
                 objeto_modificado["descansos"] += 1
                 objeto_modificado['dias_sin_descanso'] = 0
                 objeto_modificado['ultimo_turno'] = None  # Resetear al descansar
                 actualizados.append(objeto_modificado)
             else:
-                # No es día libre según la condición, pero no trabajó hoy
                 objeto_modificado = empleado.copy()
                 objeto_modificado['dias_sin_descanso'] += 1
                 actualizados.append(objeto_modificado)
         else:
-            # Trabajó hoy
             objeto_modificado = empleado.copy()
             objeto_modificado['dias_sin_descanso'] += 1
             actualizados.append(objeto_modificado)
@@ -327,9 +316,9 @@ def calcular_peso_persona (
         if diferencia_descansos > 0:
             variable_balance_descansos = -diferencia_descansos * 8.0
 
-    # Días seguidos trabajados (streak)
+    # Días seguidos trabajados (streak) considerando arrastre previo
+    dias_seguidos_trabajados = empleado.get('dias_sin_descanso', 0)
     if cronograma is not None and dia_idx is not None:
-        streak = 0
         for j in range(dia_idx - 1, -1, -1):
             dia_verificar = cronograma[j]
             trabajo = False
@@ -338,12 +327,18 @@ def calcular_peso_persona (
                     trabajo = True
                     break
             if trabajo:
-                streak += 1
+                dias_seguidos_trabajados += 1
             else:
                 break
-        dias_seguidos_trabajados = streak
-    else:
-        dias_seguidos_trabajados = empleado.get('dias_sin_descanso', 0)
+
+    # Penalización por cambio de jornada sin descanso si viene de racha previa
+    penalizacion_cambio_jornada = 0
+    if empleado.get('ultimo_turno') is not None:
+        # Si el puesto actual es de tipo opuesto y no ha descansado
+        tipo_actual = 'noche' if puesto['nocturno'] else 'dia'
+        if tipo_actual != empleado['ultimo_turno'] and dias_seguidos_trabajados > 0:
+            # Penalización fuerte si no ha descansado
+            penalizacion_cambio_jornada = -500.0
 
     variable_por_trabajos = _peso_trabajos(dias_seguidos_trabajados)
 
@@ -384,10 +379,87 @@ def calcular_peso_persona (
         + variable_especializacion_empleado
         + variable_especializacion_puesto
         + variable_cambio_jornada
+        + penalizacion_cambio_jornada
     )
 
+def dias_seguidos_trabajados_func(empleado, cronograma, dia_idx):
+    dias = empleado.get('dias_sin_descanso', 0)
+    if cronograma is not None and dia_idx is not None:
+        for j in range(dia_idx - 1, -1, -1):
+            dia_verificar = cronograma[j]
+            trabajo = False
+            for puesto_nombre in dia_verificar:
+                if puesto_nombre != 'fecha' and dia_verificar[puesto_nombre] == empleado['nombre']:
+                    trabajo = True
+                    break
+            if trabajo:
+                dias += 1
+            else:
+                break
+    return dias
+
 if __name__ == "__main__":
-    # Carga de datos
+    # --- Carga de datos ---
+    import glob
+    import os
+    # Buscar archivo Cronograma previo
+    def buscar_cronograma_previo(fecha_inicio):
+        import re
+        carpeta = os.path.dirname(os.path.abspath(__file__))
+        archivos = glob.glob(os.path.join(carpeta, 'Cronograma-*.xlsx'))
+        fecha_dia_anterior = fecha_inicio - datetime.timedelta(days=1)
+        for archivo in archivos:
+            nombre = os.path.basename(archivo)
+            # Si el nombre está dividido en varias líneas, reconstruirlo
+            if '\n' in nombre or '\r' in nombre or ' ' in nombre:
+                nombre_completo = ''.join(nombre.split())
+            else:
+                nombre_completo = nombre
+            nombre_limpio = nombre_completo.replace('.xlsx','')
+            partes = nombre_limpio.split('-')
+            # Espera formato Cronograma-YYYY-MM-DD-YYYY-MM-DD.xlsx
+            if len(partes) >= 6:
+                fecha_fin_archivo = '-'.join(partes[4:7])
+                try:
+                    fecha_fin_dt = pd.to_datetime(fecha_fin_archivo).date()
+                    if fecha_fin_dt == fecha_dia_anterior:
+                        return archivo
+                except Exception as e:
+                    continue
+            else:
+                continue
+        return None
+
+    def leer_estado_empleados_cronograma(archivo, PUESTOS):
+        # Lee la hoja Empleados y calcula el estado final de cada empleado
+        df = pd.read_excel(archivo, sheet_name='Empleados')
+        empleados_estado = {}
+        columnas_dias = [col for col in df.columns if col not in ['Nombre','Día','Noche','Descanso']]
+        for idx, row in df.iterrows():
+            dias_seguidos = 0
+            jornada_actual = None
+            cols_ventana = list(reversed(columnas_dias[-5:]))
+            valores_ventana = [row[col] for col in cols_ventana]
+            for col, puesto in zip(cols_ventana, valores_ventana):
+                # Contar como día trabajado cualquier cadena no vacía
+                if (isinstance(puesto, str) and puesto.strip() == "") or pd.isna(puesto):
+                    # Descanso, cortar el conteo de consecutivos
+                    break
+                else:
+                    dias_seguidos += 1
+                    if jornada_actual is None and isinstance(puesto, str) and puesto.strip() != "":
+                        # Solo tomar la jornada del último día trabajado
+                        for p in PUESTOS:
+                            if p['nombre'] == puesto:
+                                jornada_actual = 'noche' if p['nocturno'] else 'dia'
+                                break
+            nombre = row['Nombre']
+            empleados_estado[nombre] = {
+                'dias_seguidos': dias_seguidos,
+                'jornada_actual': jornada_actual
+            }
+        return empleados_estado
+
     pages = xls = pd.ExcelFile('Entradas.xlsm').sheet_names
     df_configs = pd.read_excel('Entradas.xlsm', sheet_name='Configs', header=None, names=['A', 'B'])
     df_empleados = pd.read_excel('Entradas.xlsm', sheet_name='Empleados', header=None, names=['nombre', 'puestos_habilitados'])
@@ -421,17 +493,62 @@ if __name__ == "__main__":
             'puestos_habilitados': puestos_empleado
         })
 
+    # --- Integrar estado previo si existe ---
+    archivo_cronograma_previo = buscar_cronograma_previo(fecha_inicio)
+    empleados_estado_previo = None
+    if archivo_cronograma_previo:
+        empleados_estado_previo = leer_estado_empleados_cronograma(archivo_cronograma_previo, PUESTOS)
+
     #Cuadro de turnos
     delta = fecha_fin - fecha_inicio
     dias = [fecha_inicio + datetime.timedelta(days=i) for i in range(delta.days + 1)]
-    empleados = [crear_clase_empleado(e) for e in EMPLEADOS]
+    empleados = []
+    for e in EMPLEADOS:
+        emp = crear_clase_empleado(e)
+        # Si hay estado previo, actualizar solo los campos de arrastre y jornada
+        if empleados_estado_previo and emp['nombre'] in empleados_estado_previo:
+            estado = empleados_estado_previo[emp['nombre']]
+            emp['dias_sin_descanso'] = estado['dias_seguidos']
+            emp['ultimo_turno'] = estado['jornada_actual']
+            # NO modificar puestos_habilitados
+        empleados.append(emp)
+
     cronograma = [cronograma_diario_vacio(dia, PUESTOS) for dia in dias]
+
+    # ...empleados y cronograma ya inicializados arriba con estado previo si existe...
+
+    # --- Inicializar bloqueos por arrastre antes de la primera asignación ---
+    bloqueos_arrastre_inicial_dia = []
+    bloqueos_arrastre_inicial_noche = []
+    for emp in empleados:
+        if emp.get('dias_sin_descanso', 0) >= 5:
+            # Bloquear en ambos tipos de turno si tiene arrastre
+            bloqueos_arrastre_inicial_dia.append(emp['nombre'])
+            bloqueos_arrastre_inicial_noche.append(emp['nombre'])
 
     for i in range(len(cronograma)):
         dia = cronograma[i]
-        print('\n\n------'+dia['fecha'].strftime("%Y-%m-%d"))
-        bloqueos_dia = []
-        bloqueos_noche = []
+        # Aplicar bloqueos de arrastre solo el primer día
+        if i == 0:
+            bloqueos_dia = bloqueos_arrastre_inicial_dia.copy()
+            bloqueos_noche = bloqueos_arrastre_inicial_noche.copy()
+        else:
+            bloqueos_dia = []
+            bloqueos_noche = []
+        # Asignar descanso explícito en el cronograma para arrastrados CADA DÍA que estén bloqueados
+        for emp in empleados:
+            dias_seguidos_trabajados = dias_seguidos_trabajados_func(emp, cronograma, i)
+            asignado = any(dia.get(puesto['nombre']) == emp['nombre'] for puesto in PUESTOS)
+            # Si está bloqueado por arrastre y no asignado, marcar descanso y resetear contador
+            if dias_seguidos_trabajados >= 5 and not asignado:
+                # Buscar un campo libre en el cronograma del día para marcar descanso
+                for puesto in PUESTOS:
+                    if dia.get(puesto['nombre']) is None:
+                        dia[puesto['nombre']] = None  # Descanso explícito
+                        break
+                # Resetear contador de días sin descanso para desbloquear
+                emp['dias_sin_descanso'] = 0
+        # ...el resto del ciclo sigue igual...
         
         # Bloqueos
         for empleado in empleados:
@@ -444,27 +561,11 @@ if __name__ == "__main__":
             
             # Bloqueo obligatorio: no trabajar más de 5 días seguidos
             # Calcular días seguidos trabajados directamente desde el cronograma
-            dias_seguidos_trabajados = 0
-            for j in range(i - 1, -1, -1):  # Retroceder desde el día anterior
-                dia_verificar = cronograma[j]
-                # Verificar si el empleado trabajó ese día (en cualquier puesto)
-                empleado_trabajo = False
-                for puesto_nombre in dia_verificar:
-                    if puesto_nombre != 'fecha' and dia_verificar[puesto_nombre] == empleado["nombre"]:
-                        empleado_trabajo = True
-                        break
-                
-                if empleado_trabajo:
-                    dias_seguidos_trabajados += 1
-                else:
-                    # Si no trabajó, verificar si fue día libre según la nueva condición
-                    # (esto requiere verificar el día anterior y siguiente, pero para simplificar,
-                    #  si no trabajó, consideramos que descansó)
-                    break
-            
+            dias_seguidos_trabajados = dias_seguidos_trabajados_func(empleado, cronograma, i)
+            # Log de depuración para todos los empleados en el primer día
+
             # Si ya trabajó 5 días seguidos, bloquear
             if dias_seguidos_trabajados >= 5:
-                # Bloquear para todos los turnos (diurnos y nocturnos)
                 if empleado["nombre"] not in bloqueos_dia:
                     bloqueos_dia.append(empleado["nombre"])
                 if empleado["nombre"] not in bloqueos_noche:
@@ -536,36 +637,41 @@ if __name__ == "__main__":
         
         puestos_con_disponibilidad = []
         for puesto in PUESTOS:
+
             nuevo_puesto = puesto.copy()
             es_nocturno = puesto["nocturno"]
-            
-            #Bloqueo por puesto
+
+            # Bloqueo por puesto
             bloqueos_puesto = [e['nombre'] for e in empleados if puesto['nombre'] not in e['puestos_habilitados']]
-            #Empleados habilitados (respetando bloqueos)
-            empleados_habilitados = []
+
+            # Empleados habilitados: SIEMPRE todos los empleados con el puesto habilitado
+            empleados_habilitados = [item for item in empleados if puesto['nombre'] in item['puestos_habilitados']]
+            # DEBUG: Revisar si Adanies está en empleados_habilitados para este puesto
+            # ...el resto del ciclo sigue igual...
+
+            # Filtrar bloqueos temporales (descanso, arrastre, etc.) SOLO en bloqueos_dia/bloqueos_noche
             if es_nocturno:
-                empleados_habilitados = [item for item in empleados if item["nombre"] not in bloqueos_noche + bloqueos_puesto]
+                empleados_disponibles = [item for item in empleados_habilitados if item["nombre"] not in bloqueos_noche]
             else:
-                empleados_habilitados = [item for item in empleados if item["nombre"] not in bloqueos_dia + bloqueos_puesto]
+                empleados_disponibles = [item for item in empleados_habilitados if item["nombre"] not in bloqueos_dia]
 
             # Hardcap: si un empleado tiene >=5 turnos nocturnos y la proporción
             # turnos_noche / max(1, turnos_dia) >= 3.0, excluirlo como candidato a turnos noche
             if es_nocturno:
                 filtrados = []
-                for emp in empleados_habilitados:
+                for emp in empleados_disponibles:
                     tn = emp.get('turnos_noche', 0)
                     td = emp.get('turnos_dia', 0)
                     if tn >= 5 and (tn / max(1, td)) >= 3.0:
-                        # excluir
                         continue
                     filtrados.append(emp)
-                empleados_habilitados = filtrados
+                empleados_disponibles = filtrados
 
             # Fallback: si no hay candidatos válidos, NO asignar el puesto (reglas estrictas)
-            if not empleados_habilitados:
-                empleados_habilitados = []
+            if not empleados_disponibles:
+                empleados_disponibles = []
 
-            nuevo_puesto["empleados_disponibles"] = empleados_habilitados
+            nuevo_puesto["empleados_disponibles"] = empleados_disponibles
             puestos_con_disponibilidad.append(nuevo_puesto)
 
         # Se busca la combinacion mas eficiente usando grafos
@@ -584,7 +690,7 @@ if __name__ == "__main__":
                 G.add_node(persona, bipartite=1)
         
         for puesto, personas in objetos_grafo.items():
-            print('\n   '+puesto)
+            # ...el resto del ciclo sigue igual...
             # Obtener la lista de empleados disponibles para este puesto
             puesto_info = next((p for p in puestos_con_disponibilidad if p['nombre'] == puesto), None)
             empleados_disponibles_puesto = puesto_info['empleados_disponibles'] if puesto_info else []
@@ -604,7 +710,7 @@ if __name__ == "__main__":
                     PUESTOS=PUESTOS,
                 )
                 empleadofull = next((empleado for empleado in empleados if empleado['nombre'] == persona), None)
-                print(f'      {persona}: {str(peso)}, {empleadofull["descansos"]}, {empleadofull["dias_sin_descanso"]}, {empleadofull["turnos_dia"]}, {empleadofull["turnos_noche"]}')
+                # ...el resto del ciclo sigue igual...
                 G.add_edge(
                     puesto, 
                     persona, 
@@ -657,49 +763,42 @@ if __name__ == "__main__":
             if puesto_nocturno_empleado:
                 # Buscar empleados con muchos diurnos que trabajaron diurno este día
                 for otro_empleado in empleados:
-                    if otro_empleado['turnos_dia'] >= 3 and otro_empleado['turnos_noche'] == 0:
+                    if otro_empleado['turnos_noche'] >= 3 and otro_empleado['turnos_dia'] == 0:
                         nombre_otro = otro_empleado['nombre']
-                        
-                        # Buscar si este otro empleado trabajó en un puesto diurno este día
+                        # Buscar si este otro empleado trabajó en un puesto nocturno este día
+                        puesto_nocturno_otro = None
                         puesto_diurno_otro = None
                         for puesto in PUESTOS:
+                            if puesto['nocturno'] and dia.get(puesto['nombre']) == nombre_otro:
+                                puesto_nocturno_otro = puesto['nombre']
                             if not puesto['nocturno'] and dia.get(puesto['nombre']) == nombre_otro:
                                 puesto_diurno_otro = puesto['nombre']
-                                break
-                        
                         # Si encontramos un intercambio posible, verificar que sea válido
-                        if puesto_diurno_otro:
+                        if puesto_nocturno_otro and puesto_diurno_otro:
                             # Verificar que ambos empleados estén habilitados para los puestos
                             # Obtener puestos habilitados desde df_empleados
                             try:
                                 puestos_habilitados_0_diurnos = df_empleados.loc[df_empleados['nombre'] == nombre_0_diurnos].iloc[0]['puestos_habilitados'].split(', ')
                                 puestos_habilitados_otro = df_empleados.loc[df_empleados['nombre'] == nombre_otro].iloc[0]['puestos_habilitados'].split(', ')
-                                
-                                if (puesto_diurno_otro in puestos_habilitados_0_diurnos and
-                                    puesto_nocturno_empleado in puestos_habilitados_otro):
-                                    
+                                if (puesto_diurno_otro in puestos_habilitados_0_diurnos and puesto_nocturno_empleado in puestos_habilitados_otro):
                                     # Verificar que no haya bloqueos (descanso válido, días seguidos, etc.)
                                     # Para simplificar, solo intercambiar si ambos tienen descanso válido
                                     dia_anterior = cronograma[i - 1] if i > 0 else None
                                     dia_siguiente = cronograma[i + 1] if i < len(cronograma) - 1 else None
-                                    
                                     # Verificar descanso válido para el cambio
                                     hay_descanso_0_diurnos = es_descanso_valido(nombre_0_diurnos, dia_anterior if dia_anterior else dia,
-                                                                               None, dia_siguiente, PUESTOS, trabajara_diurno_hoy=True)
+                                                                          None, dia_siguiente, PUESTOS, trabajara_diurno_hoy=True)
                                     hay_descanso_otro = es_descanso_valido(nombre_otro, dia_anterior if dia_anterior else dia,
                                                                           None, dia_siguiente, PUESTOS, trabajara_diurno_hoy=False)
-                                    
                                     if hay_descanso_0_diurnos and hay_descanso_otro:
                                         # Realizar el intercambio
                                         dia[puesto_diurno_otro] = nombre_0_diurnos
                                         dia[puesto_nocturno_empleado] = nombre_otro
-                                        
                                         # Actualizar contadores
                                         empleado_0_diurnos['turnos_dia'] += 1
                                         empleado_0_diurnos['turnos_noche'] -= 1
                                         otro_empleado['turnos_dia'] -= 1
                                         otro_empleado['turnos_noche'] += 1
-                                        
                                         cronograma[i] = dia
                                         # Salir del bucle interno después de un intercambio
                                         break
@@ -731,45 +830,40 @@ if __name__ == "__main__":
                 for otro_empleado in empleados:
                     if otro_empleado['turnos_noche'] >= 3 and otro_empleado['turnos_dia'] == 0:
                         nombre_otro = otro_empleado['nombre']
-                        
                         # Buscar si este otro empleado trabajó en un puesto nocturno este día
                         puesto_nocturno_otro = None
+                        puesto_diurno_otro = None
                         for puesto in PUESTOS:
                             if puesto['nocturno'] and dia.get(puesto['nombre']) == nombre_otro:
                                 puesto_nocturno_otro = puesto['nombre']
-                                break
-                        
+                            if not puesto['nocturno'] and dia.get(puesto['nombre']) == nombre_otro:
+                                puesto_diurno_otro = puesto['nombre']
                         # Si encontramos un intercambio posible, verificar que sea válido
-                        if puesto_nocturno_otro:
+                        if puesto_nocturno_otro and puesto_diurno_otro:
                             # Verificar que ambos empleados estén habilitados para los puestos
                             # Obtener puestos habilitados desde df_empleados
                             try:
                                 puestos_habilitados_0_nocturnos = df_empleados.loc[df_empleados['nombre'] == nombre_0_nocturnos].iloc[0]['puestos_habilitados'].split(', ')
                                 puestos_habilitados_otro = df_empleados.loc[df_empleados['nombre'] == nombre_otro].iloc[0]['puestos_habilitados'].split(', ')
-                                
-                                if (puesto_nocturno_otro in puestos_habilitados_0_nocturnos and
-                                    puesto_diurno_empleado in puestos_habilitados_otro):
-                                    
-                                    # Verificar descanso válido para el cambio
+                                if (puesto_nocturno_otro in puestos_habilitados_0_nocturnos and puesto_diurno_empleado in puestos_habilitados_otro):
+                                    # Verificar que no haya bloqueos (descanso válido, días seguidos, etc.)
+                                    # Para simplificar, solo intercambiar si ambos tienen descanso válido
                                     dia_anterior = cronograma[i - 1] if i > 0 else None
                                     dia_siguiente = cronograma[i + 1] if i < len(cronograma) - 1 else None
-                                    
+                                    # Verificar descanso válido para el cambio
                                     hay_descanso_0_nocturnos = es_descanso_valido(nombre_0_nocturnos, dia_anterior if dia_anterior else dia,
-                                                                                  None, dia_siguiente, PUESTOS, trabajara_diurno_hoy=False)
+                                                                          None, dia_siguiente, PUESTOS, trabajara_diurno_hoy=False)
                                     hay_descanso_otro = es_descanso_valido(nombre_otro, dia_anterior if dia_anterior else dia,
                                                                           None, dia_siguiente, PUESTOS, trabajara_diurno_hoy=True)
-                                    
                                     if hay_descanso_0_nocturnos and hay_descanso_otro:
                                         # Realizar el intercambio
                                         dia[puesto_nocturno_otro] = nombre_0_nocturnos
                                         dia[puesto_diurno_empleado] = nombre_otro
-                                        
                                         # Actualizar contadores
                                         empleado_0_nocturnos['turnos_noche'] += 1
                                         empleado_0_nocturnos['turnos_dia'] -= 1
                                         otro_empleado['turnos_noche'] -= 1
                                         otro_empleado['turnos_dia'] += 1
-                                        
                                         cronograma[i] = dia
                                         # Salir del bucle interno después de un intercambio
                                         break
@@ -838,7 +932,7 @@ if __name__ == "__main__":
         cr_individual = {
             "Nombre": [empleado["nombre"] for empleado in empleados],
             "Día": [f'=SUMPRODUCT((Cronograma!B2:B{len(PUESTOS ) + 1}=FALSE) * (COUNTIF(E{index+2}:{get_excel_column_name(len(cronograma) + 4)}{index+2}, Cronograma!A2:A{len(PUESTOS ) + 1})))' for index, empleado in enumerate(empleados)], 
-            "Noche": [f'=SUMPRODUCT((Cronograma!B2:B{len(PUESTOS ) + 1}=TRUE) * (COUNTIF(E{index+2}:{get_excel_column_name(len(cronograma) + 4)}{index+2}, Cronograma!A2:A{len(PUESTOS ) + 1})))' for index, empleado in enumerate(empleados)], 
+            "Noche": [f'=SUMPRODUCT((Cronograma!B2:B{len(PUESTOS ) + 1}=TRUE) * (COUNTIF(E{index+2}:{get_excel_column_name(len(cronograma) + 4)}{index+2}, Cronograma!A2:A{len(PUESTOS) + 1})))' for index, empleado in enumerate(empleados)], 
             "Descanso": [empleado["nombre"] for empleado in empleados],
         }
         for index, dia in enumerate(cronograma):
@@ -882,16 +976,16 @@ if __name__ == "__main__":
                     
                     # Construir condiciones de forma más compacta
                     if dia_idx > 0:
-                        col_anterior = get_excel_column_name(3 + dia_idx - 1)
+                        col_anterior_cronograma = get_excel_column_name(3 + dia_idx - 1)
                         # Verificar si trabajó nocturno ayer
-                        trabajo_ayer_nocturno = f'SUMPRODUCT((Cronograma!{col_anterior}$2:{col_anterior}${len(PUESTOS) + 1}={nombre_emp_excel})*(Cronograma!$B$2:$B${len(PUESTOS) + 1}=TRUE))>0'
+                        trabajo_ayer_nocturno = f'SUMPRODUCT((Cronograma!{col_anterior_cronograma}$2:{col_anterior_cronograma}${len(PUESTOS) + 1}={nombre_emp_excel})*(Cronograma!$B$2:$B${len(PUESTOS) + 1}=TRUE))>0'
                         cond1 = f'({dia_vacio})*NOT({trabajo_ayer_nocturno})'
                         condiciones_descanso.append(cond1)
                     
                     if dia_idx < num_dias - 1:
-                        col_siguiente = get_excel_column_name(3 + dia_idx + 1)
+                        col_siguiente_cronograma = get_excel_column_name(3 + dia_idx + 1)
                         # Verificar si trabajará diurno mañana
-                        trabajo_manana_diurno = f'SUMPRODUCT((Cronograma!{col_siguiente}$2:{col_siguiente}${len(PUESTOS) + 1}={nombre_emp_excel})*(Cronograma!$B$2:$B${len(PUESTOS) + 1}=FALSE))>0'
+                        trabajo_manana_diurno = f'SUMPRODUCT((Cronograma!{col_siguiente_cronograma}$2:{col_siguiente_cronograma}${len(PUESTOS) + 1}={nombre_emp_excel})*(Cronograma!$B$2:$B${len(PUESTOS) + 1}=FALSE))>0'
                         cond2 = f'({dia_vacio})*NOT({trabajo_manana_diurno})'
                         condiciones_descanso.append(cond2)
                     
@@ -961,16 +1055,18 @@ if __name__ == "__main__":
                                 
                                 # Condición 1: Solo aplicar si hay día anterior (dia_idx > 0)
                                 if dia_idx > 0:
-                                    col_anterior = get_excel_column_name(3 + dia_idx - 1)
-                                    trabajo_ayer_nocturno = f'SUMPRODUCT((Cronograma!{col_anterior}$2:{col_anterior}${len(PUESTOS) + 1}=$A{fila_actual})*(Cronograma!$B$2:$B${len(PUESTOS) + 1}=TRUE))>0'
-                                    cond1 = f'({dia_vacio})*NOT({trabajo_ayer_nocturno})'
+                                    col_anterior_cronograma = get_excel_column_name(3 + dia_idx - 1)
+                                    # Verificar si día anterior trabajó nocturno usando INDEX/MATCH
+                                    trabajo_ayer_nocturno = f'IF(ISERROR(MATCH({nombre_emp_ref},Cronograma!{col_anterior_cronograma}$2:{col_anterior_cronograma}${len(PUESTOS) + 1},0)),FALSE,INDEX(Cronograma!$B$2:$B${len(PUESTOS) + 1},MATCH({nombre_emp_ref},Cronograma!{col_anterior_cronograma}$2:{col_anterior_cronograma}${len(PUESTOS) + 1},0))=TRUE)'
+                                    cond1 = f'AND({dia_vacio}, NOT({trabajo_ayer_nocturno}))'
                                     condiciones_descanso.append(cond1)
                                 
                                 # Condición 2: Solo aplicar si hay día siguiente (dia_idx < num_dias - 1)
                                 if dia_idx < num_dias - 1:
-                                    col_siguiente = get_excel_column_name(3 + dia_idx + 1)
-                                    trabajo_manana_diurno = f'SUMPRODUCT((Cronograma!{col_siguiente}$2:{col_siguiente}${len(PUESTOS) + 1}=$A{fila_actual})*(Cronograma!$B$2:$B${len(PUESTOS) + 1}=FALSE))>0'
-                                    cond2 = f'({dia_vacio})*NOT({trabajo_manana_diurno})'
+                                    col_siguiente_cronograma = get_excel_column_name(3 + dia_idx + 1)
+                                    # Verificar si día siguiente trabaja diurno usando INDEX/MATCH
+                                    trabajo_manana_diurno = f'IF(ISERROR(MATCH({nombre_emp_ref},Cronograma!{col_siguiente_cronograma}$2:{col_siguiente_cronograma}${len(PUESTOS) + 1},0)),FALSE,INDEX(Cronograma!$B$2:$B${len(PUESTOS) + 1},MATCH({nombre_emp_ref},Cronograma!{col_siguiente_cronograma}$2:{col_siguiente_cronograma}${len(PUESTOS) + 1},0))=FALSE)'
+                                    cond2 = f'AND({dia_vacio}, NOT({trabajo_manana_diurno}))'
                                     condiciones_descanso.append(cond2)
                                 
                                 if condiciones_descanso:
@@ -1109,4 +1205,3 @@ if __name__ == "__main__":
         })
         
         worksheet.autofit()
-        
