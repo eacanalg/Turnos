@@ -548,14 +548,14 @@ if __name__ == "__main__":
             else:
                 empleados_habilitados = [item for item in empleados if item["nombre"] not in bloqueos_dia + bloqueos_puesto]
 
-            # Hardcap: si un empleado tiene >=10 turnos nocturnos y la proporción
+            # Hardcap: si un empleado tiene >=5 turnos nocturnos y la proporción
             # turnos_noche / max(1, turnos_dia) >= 3.0, excluirlo como candidato a turnos noche
             if es_nocturno:
                 filtrados = []
                 for emp in empleados_habilitados:
                     tn = emp.get('turnos_noche', 0)
                     td = emp.get('turnos_dia', 0)
-                    if tn >= 10 and (tn / max(1, td)) >= 3.0:
+                    if tn >= 5 and (tn / max(1, td)) >= 3.0:
                         # excluir
                         continue
                     filtrados.append(emp)
